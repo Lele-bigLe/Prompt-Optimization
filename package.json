@@ -1,0 +1,65 @@
+{
+  "name": "codex-prompt-optimizer-native",
+  "displayName": "Codex Prompt Optimizer",
+  "description": "在 Codex 输入框优化提示词，支持独立模型、会话上下文、预览和恢复。",
+  "version": "0.3.0",
+  "publisher": "local-codex-tools",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/Lele-bigLe/Prompt-Optimization.git" },
+  "private": true,
+  "engines": { "vscode": "^1.95.0" },
+  "main": "./vscode/extension.cjs",
+  "extensionKind": ["ui"],
+  "activationEvents": ["onStartupFinished", "onCommand:codexPromptOptimizer.bridgeRequest"],
+  "categories": ["Other"],
+  "contributes": {
+    "commands": [
+      { "command": "codexPromptOptimizer.settings", "title": "Codex 提示词优化：打开设置" },
+      { "command": "codexPromptOptimizer.configure", "title": "Codex 提示词优化：选择 AI 和模型" },
+      { "command": "codexPromptOptimizer.optimize", "title": "Codex 提示词优化：优化当前草稿" },
+      { "command": "codexPromptOptimizer.undo", "title": "Codex 提示词优化：恢复上次优化" },
+      { "command": "codexPromptOptimizer.enableBridge", "title": "Codex 提示词优化：启用输入框按钮" },
+      { "command": "codexPromptOptimizer.disableBridge", "title": "Codex 提示词优化：移除输入框按钮" },
+      { "command": "codexPromptOptimizer.history", "title": "Codex 提示词优化：历史回顾" }
+    ],
+    "configuration": {
+      "title": "Codex Prompt Optimizer",
+      "properties": {
+        "codexPromptOptimizer.provider": {
+          "type": "string", "enum": ["choose", "codex", "claude", "deepseek", "anthropic", "openai-compatible"], "default": "choose",
+          "description": "用哪个 AI 优化这段文字。建议打开“提示词优化：打开设置”，选择已登录的账号或自己的模型服务。"
+        },
+        "codexPromptOptimizer.uiMode": {
+          "type": "string", "enum": ["native", "inline"], "default": "native",
+          "enumDescriptions": ["把按钮放在 VS Code 底部，对聊天窗口影响较小。", "把按钮放在聊天输入框里。"],
+          "description": "优化按钮放在哪里。修改后重新加载 VS Code 才会改变位置。"
+        },
+        "codexPromptOptimizer.codexExecutable": { "type": "string", "default": "", "description": "一般留空，自动使用官方扩展自带的 Codex。只有自动找不到程序时，才填写 codex.exe 的完整路径。" },
+        "codexPromptOptimizer.claudeExecutable": { "type": "string", "default": "", "description": "一般留空，自动查找已安装的 Claude Code。只有自动找不到时，才填写 claude.exe 的完整路径。" },
+        "codexPromptOptimizer.apiBaseUrl": {
+          "type": "string", "default": "https://api.deepseek.com", "description": "自己的模型服务地址，例如 https://api.deepseek.com。使用已登录的 Codex 或 Claude Code 时不用填写。"
+        },
+        "codexPromptOptimizer.model": { "type": "string", "default": "", "description": "用于优化文字的模型。建议通过“选择 AI 和模型”选择；使用自己的 API 时，填写服务商给你的模型名称。" },
+        "codexPromptOptimizer.reasoningEffort": {
+          "type": "string", "enum": ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"], "default": "auto",
+          "enumDescriptions": ["按当前模型或客户端默认设置。", "不额外思考。", "少量思考。", "简单思考。", "适中思考。", "深入思考。", "更深入思考。", "最高强度思考，通常等待更久。"],
+          "description": "让 AI 想多深入。请在优化器设置页点击“调整思考程度”，那里只列出当前模型提供的档位。"
+        },
+        "codexPromptOptimizer.autoApply": { "type": "boolean", "default": false, "description": "开启后，优化完直接把结果填回输入框，可一键恢复。关闭时先显示预览，可以补充要求继续优化。都不会自动发送消息。" },
+        "codexPromptOptimizer.contextEnabled": {
+          "type": "boolean", "default": false, "description": "参考前面的聊天，帮助理解“这个”“继续”等说法。关闭后，只优化输入框里的这段文字，不参考聊天记录。"
+        },
+        "codexPromptOptimizer.includeImages": {
+          "type": "boolean", "default": true, "description": "让优化用的 AI 一起看输入框和参考聊天中的图片。关闭后不发送图片，原附件仍留在聊天里。"
+        },
+        "codexPromptOptimizer.supportsImages": {
+          "type": "boolean", "default": false, "description": "所选模型能不能看图片。选 Codex 模型时自动判断；其他连接在选择模型时确认。"
+        },
+        "codexPromptOptimizer.maxContextChars": { "type": "integer", "default": 24000, "minimum": 1000, "maximum": 100000, "description": "最多参考多少字的聊天内容。超出时优先保留最近的内容。通常不需要修改。" },
+        "codexPromptOptimizer.recentTurns": { "type": "integer", "default": 8, "minimum": 1, "maximum": 30, "description": "参考最近几轮聊天，一问一答算一轮。只在开启“参考前面的聊天”后使用。" },
+        "codexPromptOptimizer.timeoutSeconds": { "type": "integer", "default": 90, "minimum": 5, "maximum": 300, "description": "最多等模型多少秒。超时后停止等待，原输入保留；选择更深入的思考时可以适当增加。" },
+        "codexPromptOptimizer.historyEnabled": { "type": "boolean", "default": true, "description": "在本机保存最近 50 条已应用的优化原文和结果，方便回看；不保存图片。" }
+      }
+    }
+  }
+}

@@ -10,6 +10,8 @@
 
 感谢原项目及社区分享。本仓库发布的是面向 VS Code 的实现，包括当前会话与图片读取、独立模型调用、设置页、预览、多轮优化和恢复；原桌面增强器源码与历史不包含在本仓库中。
 
+内置模板的 8 类名称、分类及用途参考上游 [Services/TemplateLibrary.cs](https://github.com/jokerjiang666/codex-prompt-optimizer-button/blob/main/Services/TemplateLibrary.cs)，规则文本为适配本扩展重新编写；变量占位符与模板 JSON 导入格式沿用其公开约定。本仓库没有将上游桌面模板管理器的实现复制进 VS Code 扩展。
+
 ## 本仓库许可
 
 本仓库保留创建时已有的 MIT 许可证，版权声明为 `Copyright (c) 2026 LeleHello`，完整条款见 [LICENSE](LICENSE)。

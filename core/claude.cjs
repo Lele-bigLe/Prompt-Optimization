@@ -63,7 +63,7 @@ async function claudeAccount(executable, cwd) {
   });
 }
 
-async function optimizeClaude(executable, cwd, input, config, signal) {
+async function optimizeClaude(executable, cwd, input, config, signal, session = {}) {
   const prepared = prepareInput(input, config);
   if (signal?.aborted) throw new Error('已取消优化。');
   await fs.mkdir(cwd, { recursive: true });
@@ -78,38 +78,50 @@ async function optimizeClaude(executable, cwd, input, config, signal) {
     args.push('--effort', selectedEffort);
   }
   if (signal?.aborted) throw new Error('已取消优化。');
-  const process = new LineProcess(executable, args, cwd, 'Claude Code', selectedEffort ? { ...clientEnvironment, CLAUDE_CODE_EFFORT_LEVEL: selectedEffort } : undefined);
+  const sessionReused = Boolean(session.process && !session.process.closed);
+  if (sessionReused && !prepared.revisionText) throw new Error('缺少继续优化的修改要求。');
+  const process = sessionReused ? session.process : new LineProcess(executable, args, cwd, 'Claude Code', selectedEffort ? { ...clientEnvironment, CLAUDE_CODE_EFFORT_LEVEL: selectedEffort } : undefined);
+  session.process = process;
   let result;
   let timer;
   const cancel = () => process.stop();
+  let onMessage;
+  let onFault;
+  let onClose;
   try {
     const completed = new Promise((resolve, reject) => {
-      process.on('message', message => {
+      onMessage = message => {
         if (message.type !== 'result') return;
         result = message;
         if (message.is_error || message.subtype !== 'success') reject(new Error('Claude Code 未完成优化，请检查登录、模型权限或剩余额度。'));
         else resolve(message);
-      });
-      process.on('fault', reject);
-      process.on('close', code => {
+      };
+      onFault = reject;
+      onClose = code => {
         if (signal?.aborted) reject(new Error('已取消优化。'));
         else if (code !== 0 || result?.is_error || result?.subtype !== 'success') reject(new Error('Claude Code 未完成优化，请检查登录、模型权限或剩余额度。'));
         else resolve(result);
-      });
+      };
+      process.on('message', onMessage);
+      process.on('fault', onFault);
+      process.on('close', onClose);
       timer = setTimeout(() => { process.stop(); reject(new Error('Claude Code 优化超时。')); }, config.timeoutSeconds * 1000);
     });
     signal?.addEventListener('abort', cancel, { once: true });
     if (signal?.aborted) cancel();
     else {
-      const content = prepared.images.map(image => ({ type: 'image', source: { type: 'base64', media_type: image.slice(5, image.indexOf(';')), data: image.slice(image.indexOf(',') + 1) } }));
-      content.push({ type: 'text', text: prepared.text });
+      const content = sessionReused ? [] : prepared.images.map(image => ({ type: 'image', source: { type: 'base64', media_type: image.slice(5, image.indexOf(';')), data: image.slice(image.indexOf(',') + 1) } }));
+      content.push({ type: 'text', text: sessionReused ? prepared.revisionText : prepared.text });
       process.send({ type: 'user', message: { role: 'user', content } });
-      process.child.stdin.end();
     }
     const response = await completed;
     if (typeof response.result !== 'string' || !response.result.trim() || response.result.length > 100000) throw new Error('Claude Code 未返回完整可用的优化文本。');
-    return { text: response.result.trim(), model: Object.keys(response.modelUsage ?? {})[0] || config.model || 'Claude Code 当前模型', modelMs: Math.round(performance.now() - started) };
-  } finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); process.stop(); }
+    return { text: response.result.trim(), model: Object.keys(response.modelUsage ?? {})[0] || config.model || 'Claude Code 当前模型', modelMs: Math.round(performance.now() - started), sessionReused };
+  } catch (error) { process.stop(); delete session.process; throw error; }
+  finally {
+    clearTimeout(timer); signal?.removeEventListener('abort', cancel);
+    process.removeListener('message', onMessage); process.removeListener('fault', onFault); process.removeListener('close', onClose);
+  }
 }
 
 module.exports = { claudeAccount, claudeModels, optimizeClaude };

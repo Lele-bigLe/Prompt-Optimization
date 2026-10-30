@@ -30,7 +30,7 @@ function request(action, payload = {}, timeoutMs = 60000, id = crypto.randomUUID
     pending.set(id, { resolve, reject, timer });
     try {
       initializeHostApi();
-      hostApi.postMessage({ type: 'cpo:request', id, payload: { version: 2, requestId: id, action, ...payload } });
+      hostApi.postMessage({ type: 'cpo:request', id, payload: { version: 3, requestId: id, action, ...payload } });
     } catch {
       clearTimeout(timer);
       pending.delete(id);
@@ -319,7 +319,7 @@ export function bindComposer(binding) {
       request('cancel', { runId: owner.running.id }).catch(() => {});
       return;
     }
-    const run = { id: crypto.randomUUID(), cancelled: false, abort: new AbortController() };
+    const run = { id: crypto.randomUUID(), sessionId:crypto.randomUUID(), generation:0, cancelled: false, abort: new AbortController() };
     owner.running = run;
     setBusy(true);
     setStatus('读取草稿…');
@@ -329,12 +329,25 @@ export function bindComposer(binding) {
       if (!snapshot.text.trim()) throw new Error('请先填写提示词。');
       if (!options.model) throw new Error('请打开提示词优化设置，选择用哪个 AI 和模型。');
       const started = performance.now();
-      let messages = [];
-      if (options.contextEnabled) {
+      const readContext = () => {
+        if (!options.contextEnabled) return [];
         const turns = binding.turns(options.recentTurns);
         if (snapshot.source.threadId && turns == null) throw new Error('当前会话历史尚未加载，请稍后重试。');
-        messages = contextWithinBudget(collectMessages(turns ?? []), options.maxContextChars);
-      }
+        return contextWithinBudget(collectMessages(turns ?? []), options.maxContextChars);
+      };
+      const messages = readContext();
+      const ensureCurrent = () => {
+        try {
+          ensure(snapshot);
+          const current = readContext();
+          const unchanged = current.length === messages.length && messages.every((message,index) => {
+            const next = current[index];
+            return message.role === next.role && message.text === next.text && message.truncated === next.truncated && message.imageRefs.length === next.imageRefs.length
+              && (!options.includeImages || message.imageRefs.every((image,number) => image.src === next.imageRefs[number].src && image.localPath === next.imageRefs[number].localPath));
+          });
+          if (!unchanged) throw new Error('参考聊天已经变化，请关闭预览后重新优化，以读取最新背景。');
+        } catch (error) { request('release', { bindingId:owner.id, sessionId:run.sessionId }).catch(() => {}); throw error; }
+      };
       const imageRefs = options.includeImages ? snapshot.images.map(image => ({ src: image.src, localPath: image.localPath, hostId: snapshot.source.imageHostId })) : [];
       const draftImageCount = imageRefs.length;
       const context = messages.map(message => {
@@ -348,32 +361,34 @@ export function bindComposer(binding) {
         if (run.cancelled) throw new Error('已取消优化。');
         images.push(await imageData(image, snapshot.source, options, run.abort.signal));
       }
-      ensure(snapshot);
+      ensureCurrent();
       if (run.cancelled) throw new Error('已取消优化。');
       const captureMs = Math.round(performance.now() - started);
       const getResult = async revision => {
-        ensure(snapshot);
+        ensureCurrent();
         if (run.cancelled) throw new Error('已取消优化。');
         run.id = crypto.randomUUID();
         setStatus(`正在优化 · ${options.model}`);
         const result = await request('optimize', {
-          configurationId: options.configurationId, draft: snapshot.text, context, images, draftImageCount, revision,
+          configurationId:options.configurationId, bindingId:owner.id, sourceIdentity:snapshot.identity, sessionId:run.sessionId, generation:run.generation,
+          ...(revision ? { revision } : { draft:snapshot.text, context, images, draftImageCount }),
         }, (options.timeoutSeconds + 15) * 1000, run.id);
         if (run.cancelled) throw new Error('已取消优化。');
-        ensure(snapshot);
+        ensureCurrent();
+        run.generation = result.generation;
         setStatus('结果已准备好');
         return result;
       };
       let result = await getResult();
       const scope = options.contextEnabled ? `参考前面 ${context.length} 条聊天` : '只看这段输入';
       const imageSummary = options.includeImages ? `图片 ${images.length} 张` : '图片未发送，附件保留';
-      const describe = value => `${value.model} · ${value.effortLabel || '模型默认'} · ${scope} · ${imageSummary} · 读取 ${captureMs} ms · 优化 ${(value.modelMs / 1000).toFixed(1)} 秒`;
+      const describe = value => `${options.template?.name || '基础优化'} · ${value.model} · ${value.effortLabel || '模型默认'} · ${scope} · ${imageSummary} · ${value.sessionReused ? '沿用本次优化会话' : '新建优化会话'} · 读取 ${captureMs} ms · 优化 ${(value.modelMs / 1000).toFixed(1)} 秒`;
       if (!options.autoApply) {
         setStatus('可以应用，也可以继续优化');
         result = await preview(snapshot.text, result, describe, owner, (previous, instructions) => getResult({ previousPrompt: previous.text, instructions }));
         if (!result) { setStatus('已保留原文'); return; }
       }
-      ensure(snapshot);
+      ensureCurrent();
       if (run.cancelled) throw new Error('已取消优化。');
       if (result.text !== snapshot.text) {
         try {
@@ -398,6 +413,7 @@ export function bindComposer(binding) {
         if (!controls) request('notify', { text: error.message || '优化失败，草稿未替换。' }).catch(() => {});
       }
     } finally {
+      request('release', { bindingId:owner.id, sessionId:run.sessionId }).catch(() => {});
       owner.running = null;
       if (!owner.disposed) setBusy(false);
     }

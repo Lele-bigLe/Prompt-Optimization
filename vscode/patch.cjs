@@ -158,4 +158,4 @@ async function disableBridge(storage) {
   });
 }
 
-module.exports = { enableBridge, disableBridge, prepareFiles };
+module.exports = { enableBridge, disableBridge, prepareFiles, readState };

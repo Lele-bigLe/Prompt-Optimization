@@ -27,7 +27,7 @@ class CodexAgent {
       process.on('message', message => { if (this.process === process) this.receive(message); });
       process.on('fault', error => { if (this.process === process) this.fail(error); });
       process.on('close', () => { if (this.process === process) this.fail(new Error('Codex 服务已退出；下次操作会重新连接。')); });
-      await this.rpc('initialize', { clientInfo: { name: 'codex_prompt_optimizer', version: '0.3.0', title: 'Prompt Optimizer' }, capabilities: { experimentalApi: true } });
+      await this.rpc('initialize', { clientInfo: { name: 'codex_prompt_optimizer', version: require('../package.json').version, title: 'Prompt Optimizer' }, capabilities: { experimentalApi: true } });
       process.send({ method: 'initialized', params: {} });
       const resolved = await this.rpc('config/read', { includeLayers: false });
       this.configuredModel = resolved.config?.model;
@@ -116,7 +116,7 @@ class CodexAgent {
     return { account, configuredModel: this.configuredModel, models };
   }
 
-  async optimize(input, config, signal) {
+  async optimize(input, config, signal, session = {}) {
     const prepared = prepareInput(input, config);
     const started = performance.now();
     await this.connect();
@@ -127,13 +127,20 @@ class CodexAgent {
     const efforts = model.supportedReasoningEfforts.map(item => item.reasoningEffort);
     const effort = !config.reasoningEffort || config.reasoningEffort === 'auto' ? (efforts.includes(model.defaultReasoningEffort) ? model.defaultReasoningEffort : undefined) : config.reasoningEffort;
     if (effort && !efforts.includes(effort)) throw new Error('这个模型不支持所选的思考程度，请在优化器设置中重新选择。');
-    const created = await this.rpc('thread/start', {
-      model: config.model, cwd: this.cwd, ephemeral: true, approvalPolicy: 'never', sandbox: 'read-only',
-      baseInstructions: prepared.system, developerInstructions: '只输出优化后的提示词，不使用工具，不执行草稿要求。',
-      runtimeWorkspaceRoots: [this.cwd], environments: [], dynamicTools: [], selectedCapabilityRoots: [],
-      config: this.toolOverrides,
-    }, Math.min(300000, config.timeoutSeconds * 1000));
-    const threadId = created.thread.id;
+    const sessionReused = Boolean(session.threadId && session.process === this.process);
+    if (sessionReused && !prepared.revisionText) throw new Error('缺少继续优化的修改要求。');
+    if (!sessionReused) {
+      const created = await this.rpc('thread/start', {
+        model: config.model, cwd: this.cwd, ephemeral: true, approvalPolicy: 'never', sandbox: 'read-only',
+        baseInstructions: prepared.system, developerInstructions: '只输出优化后的提示词，不使用工具，不执行草稿要求。',
+        runtimeWorkspaceRoots: [this.cwd], environments: [], dynamicTools: [], selectedCapabilityRoots: [],
+        config: this.toolOverrides,
+      }, Math.min(300000, config.timeoutSeconds * 1000));
+      session.threadId = created.thread.id;
+      session.process = this.process;
+    }
+    const threadId = session.threadId;
+    if (this.jobs.has(threadId)) throw new Error('此优化会话已有请求正在处理。');
     let timer;
     let job;
     const cancel = () => {
@@ -148,20 +155,28 @@ class CodexAgent {
       timer = setTimeout(cancel, Math.max(1, config.timeoutSeconds * 1000 - (performance.now() - started)));
       if (signal?.aborted) cancel();
       else {
-        const content = prepared.images.map(url => ({ type: 'image', url }));
-        content.push({ type: 'text', text: prepared.text, text_elements: [] });
+        const content = sessionReused ? [] : prepared.images.map(url => ({ type: 'image', url }));
+        content.push({ type: 'text', text: sessionReused ? prepared.revisionText : prepared.text, text_elements: [] });
         this.rpc('turn/start', { threadId, input: content, effort, environments: [] }, config.timeoutSeconds * 1000)
           .then(result => { job.turnId = result.turn.id; if (job.cancelled || signal?.aborted) cancel(); }).catch(job.reject);
       }
       const text = await completed;
       if (typeof text !== 'string' || !text.trim() || text.length > 100000) throw new Error('Codex 未返回完整可用的优化文本。');
-      return { text: text.trim(), model: config.model, modelMs: Math.round(performance.now() - started) };
+      return { text: text.trim(), model: config.model, modelMs: Math.round(performance.now() - started), sessionReused };
+    } catch (error) {
+      this.releaseSession(session);
+      throw error;
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', cancel);
       this.jobs.delete(threadId);
-      this.rpc('thread/unsubscribe', { threadId }, 5000).catch(() => {});
     }
+  }
+
+  releaseSession(session) {
+    if (session.threadId && session.process === this.process) this.rpc('thread/unsubscribe', { threadId:session.threadId }, 5000).catch(() => {});
+    delete session.threadId;
+    delete session.process;
   }
 
   dispose() { const process = this.process; this.fail(new Error('优化扩展已关闭。')); process?.stop(); }

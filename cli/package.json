@@ -1,0 +1,19 @@
+{
+  "name": "prompt-optimization-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "在 Codex CLI 中后台优化未发送草稿，不打开浏览器。",
+  "license": "MIT",
+  "bin": {
+    "cpo": "index.cjs"
+  },
+  "engines": {
+    "node": ">=18.20.0"
+  },
+  "os": [
+    "win32"
+  ],
+  "dependencies": {
+    "ws": "^8.22.1"
+  }
+}

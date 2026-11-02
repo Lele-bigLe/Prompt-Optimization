@@ -1,6 +1,7 @@
 .git/**
 node_modules/**
 artifacts/**
+cli/**
 *.vsix
 *.log
 .gitignore

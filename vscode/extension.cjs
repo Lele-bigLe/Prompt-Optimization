@@ -28,10 +28,30 @@ let openSettings;
 let codexAgent;
 let connections;
 let templates;
+let entryConfig;
+let entryMessage = '';
+let reloadRequired = false;
 const apiCatalogs = new Map();
 const optimizationSessions = new Map();
-const effortLabels = { auto: '按模型默认', none: '不额外思考', minimal: '少量思考', low: '简单思考', medium: '适中思考', high: '深入思考', xhigh: '更深入思考', max: '最高强度思考' };
+const effortLabels = { auto: '按模型默认', none: '不额外思考', minimal: '少量思考', low: '简单思考', medium: '适中思考', high: '深入思考', xhigh: '更深入思考', max: '最高强度思考', ultra: '极高强度思考' };
 const sourceLabels = { choose: '还没选择 AI', codex: '已登录的 Codex', claude: '已登录的 Claude Code', deepseek: 'DeepSeek', anthropic: 'Claude API', 'openai-compatible': '自定义 API' };
+
+function renderEntry(config) {
+  if (config) entryConfig = config;
+  if (!statusBar) return;
+  const connected = composers.size > 0;
+  const hint = reloadRequired ? '需重新加载' : !connected ? '未连接' : !composers.has(activeComposer) ? '请点选输入框' : '';
+  statusBar.text = '$(sparkle) 优化提示词' + (hint ? ` · ${hint}` : '');
+  statusBar.command = !connected || reloadRequired ? `${prefix}.settings` : `${prefix}.optimize`;
+  statusBar.tooltip = [
+    hint || '已连接当前 Codex 输入框',
+    entryConfig ? entryConfig.provider === 'choose' ? '请先在优化设置中选择模型连接' : `优化模型：${sourceLabels[entryConfig.provider] || entryConfig.provider} · ${entryConfig.model || '客户端当前模型'}` : '正在读取优化模型设置',
+    entryConfig ? `思考程度：${effortLabelFor(entryConfig)}` : '',
+    entryMessage,
+    connected && !reloadRequired ? 'Ctrl+Alt+O 优化；Ctrl+Alt+Z 恢复原文' : '点击查看连接状态和恢复入口',
+  ].filter(Boolean).join('\n');
+  statusBar.show();
+}
 
 async function executableFor(kind) {
   const config = vscode.workspace.getConfiguration(prefix);
@@ -121,11 +141,11 @@ function secretId(config) {
   return `${prefix}.key.${createHash('sha256').update(`${config.provider}|${endpointFor(config)}`).digest('hex')}`;
 }
 
-async function configure(context, profileId, signal) {
+async function configure(context, profileId, signal, reuseSource = false) {
   const store = await connections.read();
   const selectedProfile = store.items.find(item => item.id === profileId);
   const current = { ...await settings(store), ...selectedProfile };
-  const source = await vscode.window.showQuickPick([
+  const source = reuseSource && ['codex', 'claude'].includes(selectedProfile?.provider) ? { value: selectedProfile.provider } : await vscode.window.showQuickPick([
     { label: '$(account) 使用已登录的 Codex', value: 'codex', description: '沿用 Codex 的账号，不用再填密钥' },
     { label: '$(account) 使用已登录的 Claude Code', value: 'claude', description: '沿用 Claude Code 的账号和模型服务' },
   ], { title: '让哪个 AI 帮你优化提示词？', ignoreFocusOut: true });
@@ -134,6 +154,7 @@ async function configure(context, profileId, signal) {
   let selectedModel;
   if (source.value === 'codex') {
     const catalog = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '读取 Codex 当前账号和模型目录' }, async () => (await getCodex(context)).catalog());
+    if (signal?.aborted) throw new Error('已取消选择。');
     const selected = await vscode.window.showQuickPick(catalog.models.map(model => ({
       label: model.displayName || model.model, description: model.model,
       detail: `${catalog.account}${model.model === catalog.configuredModel ? ' · 当前环境模型' : ''}${model.inputModalities?.includes('image') ? ' · 支持图片' : ''}`, model,
@@ -149,6 +170,7 @@ async function configure(context, profileId, signal) {
       await claudeAccount(executable, cwd);
       return claudeModels(executable, cwd, true);
     });
+    if (signal?.aborted) throw new Error('已取消选择。');
     const selected = await vscode.window.showQuickPick([
       { label: '跟随 Claude Code 当前模型', value: '', description: '保留当前账号、环境变量和用户配置的选择' },
       ...models.map(model => ({ label: model.displayName || model.value, value: model.value, description: model.resolvedModel || model.value, model })),
@@ -202,7 +224,7 @@ async function pickEffort(context, config, knownModel, skipUnavailable = false) 
   const choice = await vscode.window.showQuickPick([
     { label: config.provider === 'claude' ? '跟随 Claude Code 当前设置' : config.provider === 'codex' ? effortLabels.auto : '保持当前调用方式', value: 'auto', detail: explanation },
     ...[...new Set(levels)].map(value => ({ label: effortLabels[value] || value, value, description: value,
-      detail: ['none', 'minimal', 'low'].includes(value) ? '适合日常改写，通常等待较短。' : ['xhigh', 'max'].includes(value) ? '适合复杂要求，通常等待更久。' : '用于需要梳理多个条件和步骤的需求。',
+      detail: ['none', 'minimal', 'low'].includes(value) ? '适合日常改写，通常等待较短。' : ['xhigh', 'max', 'ultra'].includes(value) ? '适合复杂要求，通常等待更久。' : '用于需要梳理多个条件和步骤的需求。',
     })),
   ], { title: '让 AI 想多深入？', placeHolder: `当前：${effortLabels[config.reasoningEffort] || effortLabels.auto}`, ignoreFocusOut: true });
   return choice?.value;
@@ -218,21 +240,28 @@ function effortLabelFor(config) {
 async function settingsState() {
   const [store, templateState] = await Promise.all([connections.read(), templates.read()]);
   const config = await settings(store, templateState);
-  const fields = Object.fromEntries(['contextEnabled', 'includeImages', 'supportsImages', 'autoApply', 'historyEnabled', 'uiMode', 'recentTurns', 'timeoutSeconds'].map(name => [name, config[name]]));
+  const fields = Object.fromEntries(['contextEnabled', 'includeImages', 'supportsImages', 'autoApply', 'historyEnabled', 'uiMode', 'recentTurns', 'maxContextChars', 'timeoutSeconds'].map(name => [name, config[name]]));
   const items = await Promise.all(store.items.map(async item => ({ ...item, hasKey: providers.includes(item.provider) && Boolean(await connections.key(item)) })));
   const codex = vscode.extensions.getExtension('openai.chatgpt');
   const compatible = codex?.packageJSON.version === compatibility.extensionVersion;
   let bridge;
   let bridgeStatus;
+  let bridgeLabel;
   try {
     bridge = await readState(connections.storage);
-    bridgeStatus = composers.size ? '当前窗口已连接，可以优化输入框内容。' : bridge?.enabled ? '接入已安装；请打开 Codex 聊天。刚安装或停用后需重新加载窗口。' : '尚未启用接入，请在下方启用后重新加载窗口。';
-    if (bridge?.enabled && bridge.bridgeHash !== createHash('sha256').update(await fs.readFile(path.join(__dirname,'bridge.mjs'))).digest('hex')) bridgeStatus = '接入脚本需要更新：请先停用并恢复 Codex 文件，再重新启用，最后手动重新加载窗口。';
-  } catch { bridgeStatus = '接入状态读取失败，请检查扩展存储中的 bridge-state.json。'; }
-  if (!codex) bridgeStatus = '未找到官方 Codex 扩展；仍可先配置模型连接。';
-  else if (!compatible) bridgeStatus = `当前 Codex ${codex.packageJSON.version} 尚未适配，支持版本为 ${compatibility.extensionVersion}。`;
+    bridgeLabel = !bridge?.enabled ? '未连接' : composers.size ? '已连接' : '等待输入框';
+    bridgeStatus = !bridge?.enabled ? '点击“连接 Codex 输入框”，完成后保存草稿并手动重新加载窗口。' : composers.size ? '当前窗口的输入框已连接，可以优化草稿。' : '连接文件已就绪。请打开 Codex 聊天并点击输入框；若刚连接，请先重新加载窗口。';
+    if (bridge?.enabled && bridge.bridgeHash !== createHash('sha256').update(await fs.readFile(path.join(__dirname,'bridge.mjs'))).digest('hex')) {
+      bridgeLabel = '需要更新连接';
+      bridgeStatus = '请先断开并恢复原文件，再重新连接，最后保存草稿并手动重新加载窗口。';
+    }
+    if (reloadRequired) { bridgeLabel = '需重新加载'; bridgeStatus = '连接文件已改变。请保存草稿后执行“Developer: Reload Window”，再打开 Codex 输入框。'; }
+  } catch { bridgeLabel = '状态读取失败'; bridgeStatus = '无法读取连接状态，请检查扩展存储中的 bridge-state.json。'; }
+  if (!codex) { bridgeLabel = '未找到 Codex'; bridgeStatus = '请先安装官方 Codex 扩展；仍可在这里配置优化模型。'; }
+  else if (!compatible) { bridgeLabel = '版本未适配'; bridgeStatus = `当前 Codex ${codex.packageJSON.version} 尚未适配，支持版本为 ${compatibility.extensionVersion}。`; }
+  renderEntry(config);
   return { ...fields, configurationId: configId(config), modelLabel: `${sourceLabels[config.provider] || config.provider} · ${config.model || (config.provider === 'claude' ? '跟随当前模型' : '请添加或选择连接')}`, effortLabel: effortLabelFor(config),
-    connections: items, connectionsRevision: store.revision, activeConnectionId: store.activeId, bridgeStatus,
+    connections: items, connectionsRevision: store.revision, activeConnectionId: store.activeId, bridgeStatus, bridgeLabel,
     templates:templates.all(templateState), templatesRevision:templateState.revision, activeTemplateId:templateState.activeId, templateVariablePattern:variablePattern,
     canEnable: compatible && bridge !== undefined && !bridge?.enabled, canDisable: bridge?.enabled === true };
 }
@@ -245,8 +274,8 @@ async function saveOption(name, value, expectedId) {
     if (name === 'includeImages' && value && !config.supportsImages) throw new Error('请先选择能看图的模型。');
   } else if (name === 'uiMode') {
     if (!['native', 'inline'].includes(value)) throw new Error('请选择按钮放置位置。');
-  } else if (['recentTurns', 'timeoutSeconds'].includes(name)) {
-    const [minimum, maximum] = name === 'recentTurns' ? [1, 30] : [5, 300];
+  } else if (['recentTurns', 'maxContextChars', 'timeoutSeconds'].includes(name)) {
+    const [minimum, maximum] = name === 'recentTurns' ? [1, 30] : name === 'maxContextChars' ? [1000, 100000] : [5, 300];
     if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`请填写 ${minimum} 到 ${maximum} 之间的整数。`);
   } else throw new Error('不能通过此页面修改这个选项。');
   if (config[name] !== value) await vscode.workspace.getConfiguration(prefix).update(name, value, vscode.ConfigurationTarget.Global);
@@ -254,6 +283,14 @@ async function saveOption(name, value, expectedId) {
 
 function catalogId(config, key) {
   return createHash('sha256').update(`${config.provider}|${endpointFor(config)}|${key}`).digest('hex');
+}
+
+function validateEffort(profile) {
+  if (typeof profile.reasoningEffort !== 'string' || !/^[a-z][a-z0-9_-]{0,29}$/.test(profile.reasoningEffort)) throw new Error('请选择有效的思考程度。');
+  if (profile.reasoningEffort === 'auto') return;
+  const known = profile.modelMetadata?.id === profile.model && Array.isArray(profile.modelMetadata?.levels);
+  const levels = known ? profile.modelMetadata.levels : providers.includes(profile.provider) ? efforts : [];
+  if (!levels.includes(profile.reasoningEffort)) throw new Error(known ? '所选模型不提供这个思考档位，请重新选择。' : '当前连接尚未确认这个思考档位，请重新选择模型读取能力目录，或使用默认档位。');
 }
 
 async function connectionDraft(form, requireModel = true) {
@@ -270,7 +307,6 @@ async function connectionDraft(form, requireModel = true) {
     apiBaseUrl: text(form.apiBaseUrl || '', 2000, 'API 地址'), model: text(form.model || '', 200, '模型 ID'),
     reasoningEffort: form.reasoningEffort, supportsImages: form.supportsImages === true,
     tokenLimitParameter: form.tokenLimitParameter === 'max_completion_tokens' ? 'max_completion_tokens' : 'max_tokens' };
-  if (!['auto', ...efforts].includes(profile.reasoningEffort)) throw new Error('请选择有效的思考程度。');
   if (requireModel && !profile.model && profile.provider !== 'claude') throw new Error('请选择或填写模型 ID。');
   let key;
   let sameEndpoint = false;
@@ -289,12 +325,21 @@ async function connectionDraft(form, requireModel = true) {
   }
   if (profile.modelMetadata?.id === profile.model) {
     if (typeof profile.modelMetadata.supportsImages === 'boolean') profile.supportsImages = profile.modelMetadata.supportsImages;
-    if (requireModel && Array.isArray(profile.modelMetadata.levels) && profile.reasoningEffort !== 'auto' && !profile.modelMetadata.levels.includes(profile.reasoningEffort)) throw new Error('所选模型不提供这个思考档位，请重新选择。');
   }
+  if (requireModel) validateEffort(profile);
   return { profile, key, enteredKey: typeof form.apiKey === 'string' && form.apiKey.trim() ? key : undefined };
 }
 
 async function connectionAction(action, message, signal) {
+  if (action === 'saveEffort') {
+    const store = await connections.read();
+    const previous = store.items.find(item => item.id === message.id && item.id === store.activeId);
+    if (!previous || store.revision !== message.connectionsRevision) throw new Error('正在使用的连接已变化，请确认当前模型后再调整思考程度。');
+    const profile = { ...previous, reasoningEffort: message.value };
+    validateEffort(profile);
+    await connections.save(profile, undefined, store.revision);
+    return { notice: '思考程度已自动保存，下次优化时使用。' };
+  }
   if (['activateConnection', 'removeConnection', 'clearKey'].includes(action)) {
     const store = await connections.read();
     const profile = store.items.find(item => item.id === message.id);
@@ -338,7 +383,9 @@ async function changeBridge(context, enabled) {
     if (!codex) throw new Error('未找到官方 Codex 扩展。');
     await enableBridge(codex.extensionPath, context.globalStorageUri.fsPath);
   } else await disableBridge(context.globalStorageUri.fsPath);
-  return enabled ? '接入已安装。请保存工作后手动重新加载 VS Code 窗口。' : '接入文件已恢复。请保存工作后手动重新加载 VS Code 窗口。';
+  reloadRequired = true;
+  renderEntry();
+  return enabled ? '已准备连接输入框。请保存草稿后手动重新加载 VS Code 窗口。' : '已断开连接并恢复原文件。请保存草稿后手动重新加载 VS Code 窗口。';
 }
 
 async function templateAction(action, message, signal) {
@@ -434,30 +481,35 @@ async function showHistory(context) {
 
 async function bridgeRequest(context, output, request, sender) {
   if (request?.version !== 3 || typeof request.requestId !== 'string' || request.requestId.length > 100) {
-    throw new Error('优化器接入协议已更新。请在优化设置的高级区域先停用接入，再启用并手动重新加载窗口。');
+    throw new Error('优化器连接协议已更新。请在优化设置顶部先断开连接，再重新连接，并手动重新加载窗口。');
   }
   let config = ['options', 'image', 'optimize'].includes(request.action) ? await settings() : legacySettings();
+  if (['options', 'image', 'optimize'].includes(request.action)) renderEntry(config);
   switch (request.action) {
     case 'register':
       if (typeof sender !== 'function' || typeof request.bindingId !== 'string' || request.bindingId.length > 100) throw new Error('请重新加载窗口以启用新版界面桥接。');
       composers.set(request.bindingId, sender);
       if (request.focused) activeComposer = request.bindingId;
       while (composers.size > 32) composers.delete(composers.keys().next().value);
-      statusBar.show();
-      settingsButton.show();
+      entryMessage = '';
+      renderEntry();
       return { uiMode: config.uiMode };
     case 'focus':
       if (composers.has(request.bindingId)) activeComposer = request.bindingId;
+      entryMessage = '';
+      renderEntry();
       return { ok: true };
     case 'unregister':
       for (const session of optimizationSessions.values()) if (session.bindingId === request.bindingId) releaseSession(session.id);
       composers.delete(request.bindingId);
       if (activeComposer === request.bindingId) activeComposer = null;
-      if (!composers.size) statusBar.hide();
+      entryMessage = '';
+      renderEntry();
       return { ok: true };
     case 'status':
       if (request.bindingId === activeComposer && typeof request.text === 'string') {
-        statusBar.text = '$(sparkle) ' + request.text.slice(0, 90);
+        entryMessage = request.text.slice(0, 90);
+        renderEntry();
       }
       return { ok: true };
     case 'notify':
@@ -557,16 +609,14 @@ function activate(context) {
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 50);
   statusBar.name = 'Codex 提示词优化';
   statusBar.text = '$(sparkle) 优化提示词';
-  statusBar.tooltip = '优化最近聚焦的 Codex 草稿（Ctrl+Alt+O）；恢复：Ctrl+Alt+Z';
-  statusBar.command = `${prefix}.optimize`;
   settingsButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 49);
-  settingsButton.name = '提示词优化设置';
-  settingsButton.text = '$(gear) 优化设置';
-  settingsButton.tooltip = '提示词优化设置：模型、模板、思考程度、参考聊天、应用方式';
-  settingsButton.command = `${prefix}.settings`;
+  settingsButton.name = '提示词优化菜单';
+  settingsButton.text = '$(ellipsis) 优化菜单';
+  settingsButton.tooltip = '设置、恢复原文、优化记录';
+  settingsButton.command = `${prefix}.menu`;
   settingsButton.show();
   openSettings = createSettings(context, {
-    state: settingsState, configure: (id, signal) => configure(context, id, signal), history: () => showHistory(context), save: saveOption,
+    state: settingsState, configure: (id, signal, reuseSource) => configure(context, id, signal, reuseSource), history: () => showHistory(context), save: saveOption,
     connection: connectionAction, template:templateAction, bridge: enabled => changeBridge(context, enabled),
   });
   const register = (name, handler) => context.subscriptions.push(vscode.commands.registerCommand(`${prefix}.${name}`, async (...args) => {
@@ -577,12 +627,25 @@ function activate(context) {
   register('settings', () => openSettings());
   register('history', () => showHistory(context));
   const invoke = async action => {
+    if (reloadRequired || !composers.size) { openSettings(); return; }
     const sender = composers.get(activeComposer);
     if (!sender) { vscode.window.showInformationMessage('请先点击一次目标 Codex 输入框，再使用优化或恢复。'); return; }
     await sender({ type: 'cpo:command', bindingId: activeComposer, action });
   };
   register('optimize', () => invoke('optimize'));
   register('undo', () => invoke('undo'));
+  register('menu', async () => {
+    const config = await settings();
+    renderEntry(config);
+    const choice = await vscode.window.showQuickPick([
+      { label: '$(gear) 打开优化设置', action: 'settings', description: '连接状态、模型、思考程度和模板' },
+      { label: '$(discard) 恢复原文', action: 'undo', description: '恢复当前输入框上一次优化前的草稿' },
+      { label: '$(history) 查看优化记录', action: 'history', description: '查看本机最近已应用的优化' },
+    ], { title: '提示词优化', placeHolder: `${sourceLabels[config.provider] || config.provider} · ${config.model || '请先选择模型'} · ${effortLabelFor(config)}` });
+    if (choice?.action === 'settings') openSettings();
+    else if (choice?.action === 'undo') await invoke('undo');
+    else if (choice?.action === 'history') await showHistory(context);
+  });
   register('enableBridge', async () => {
     vscode.window.showInformationMessage(await changeBridge(context, true));
   });
@@ -595,7 +658,15 @@ function activate(context) {
     catch (error) { return { ok: false, error: error.message || '提示词优化失败。' }; }
   };
   context.subscriptions.push(vscode.commands.registerCommand(`${prefix}.bridgeRequest`, request => handleBridgeRequest(request)), statusBar, settingsButton, output, {
-    dispose() { for (const session of optimizationSessions.values()) releaseSession(session.id); for (const abort of active.values()) abort.abort(); codexAgent?.dispose(); active.clear(); pendingHistory.clear(); composers.clear(); activeComposer = null; },
+    dispose() { for (const session of optimizationSessions.values()) releaseSession(session.id); for (const abort of active.values()) abort.abort(); codexAgent?.dispose(); active.clear(); pendingHistory.clear(); composers.clear(); activeComposer = null; statusBar = null; settingsButton = null; },
+  });
+  renderEntry();
+  // 只异步读取本机偏好，不在启动时启动模型服务或获取远程目录。
+  settings().then(renderEntry).catch(error => {
+    if (!statusBar) return;
+    entryMessage = '模型设置读取失败，请打开优化设置检查。';
+    output.appendLine(error.message || entryMessage);
+    renderEntry();
   });
   return { handleBridgeRequest };
 }

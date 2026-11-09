@@ -14,7 +14,7 @@ function createSettings(context, handlers) {
     current.onDidDispose(() => { running?.abort(); if (panel === current) panel = null; });
     current.webview.onDidReceiveMessage(async message => {
       const templateActions = ['saveTemplate','useTemplate','copyTemplate','removeTemplate','importTemplates','exportTemplate'];
-      const actions = ['ready', 'reload', 'reloadTemplates', 'configure', 'save', 'history', 'advanced', 'bridge', 'saveConnection', 'activateConnection', 'removeConnection', 'clearKey', 'models', 'test', 'balance', ...templateActions];
+      const actions = ['ready', 'reload', 'reloadTemplates', 'configure', 'save', 'saveEffort', 'history', 'advanced', 'bridge', 'saveConnection', 'activateConnection', 'removeConnection', 'clearKey', 'models', 'test', 'balance', ...templateActions];
       if (message?.action === 'cancel') { running?.abort(); return; }
       if (!message || !actions.includes(message.action) || running) return;
       const controller = new AbortController();
@@ -23,7 +23,7 @@ function createSettings(context, handlers) {
       let error;
       try {
         if (message.action === 'configure') {
-          const id = await handlers.configure(message.id, controller.signal);
+          const id = await handlers.configure(message.id, controller.signal, message.reuseSource === true);
           result = id ? { selectedId: id, notice: '已保存并启用所选账号和模型。' } : { notice: '已取消选择，连接未更改。' };
         } else if (message.action === 'save') {
           await handlers.save(message.name, message.value, message.configurationId);
@@ -59,12 +59,32 @@ main{max-width:800px;margin:auto}h1{font-size:22px;margin:0 0 4px}h2{font-size:1
 button,select,input,textarea{font:inherit;border:1px solid var(--vscode-input-border,transparent);border-radius:5px;padding:6px 10px}button{cursor:pointer;background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}button:hover{background:var(--vscode-button-secondaryHoverBackground)}button.primary{background:var(--vscode-button-background);color:var(--vscode-button-foreground)}button.primary:hover{background:var(--vscode-button-hoverBackground)}button:disabled,input:disabled,select:disabled,textarea:disabled{opacity:.5;cursor:default}
 textarea{box-sizing:border-box;width:100%;resize:vertical;min-height:110px;line-height:1.6;background:var(--vscode-input-background);color:var(--vscode-input-foreground)}textarea:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:2px}
 button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:2px}select,input{background:var(--vscode-input-background);color:var(--vscode-input-foreground)}input[type=checkbox]{padding:0}input[type=number]{width:80px}fieldset{border:0;margin:0;padding:0;min-width:0}#notice{min-height:24px;margin:12px 0;overflow-wrap:anywhere}.error{color:var(--vscode-errorForeground)}small{color:var(--vscode-descriptionForeground)}details{margin:16px 0}summary{cursor:pointer}#savedConnections{min-width:0;flex:1}.result{overflow-wrap:anywhere;margin:8px 0;color:var(--vscode-descriptionForeground)}[hidden]{display:none!important}
-@media(max-width:540px){body{padding:16px}.row{align-items:stretch;flex-direction:column;gap:8px}.form-row{grid-template-columns:1fr;gap:4px}.form-row>label{padding:0}}
+.connection-card{margin:20px 0;padding:16px;border:1px solid var(--vscode-widget-border,#7775);border-radius:6px;background:var(--vscode-editorWidget-background)}.connection-card h2{margin-bottom:4px}.connection-card .actions{margin-bottom:0}.tabs{display:flex;gap:4px;position:sticky;top:0;z-index:1;padding:10px 0;background:var(--vscode-editor-background);border-bottom:1px solid var(--vscode-widget-border,#7775)}.tabs button{flex:1;background:transparent;color:var(--vscode-descriptionForeground);border-color:transparent;border-radius:3px}.tabs button[aria-selected=true]{background:var(--vscode-button-secondaryBackground);color:var(--vscode-foreground);border-bottom:2px solid var(--vscode-focusBorder)}.tabs button:hover{background:var(--vscode-toolbar-hoverBackground)}.section-note{margin-bottom:18px}.request-status{display:flex;align-items:center;gap:12px;min-height:32px}.request-status #notice{flex:1;margin:8px 0}.compact-actions{margin:6px 0}.connection-badge{font-size:12px;font-weight:400;margin-left:8px;color:var(--vscode-descriptionForeground)}.summary-card{margin:16px 0;padding:12px 16px;border-left:3px solid var(--vscode-focusBorder);background:var(--vscode-editorWidget-background)}.tab-panel section:last-child{border-bottom:0}
+@media(max-width:540px){body{padding:16px}.row{align-items:stretch;flex-direction:column;gap:8px}.form-row{grid-template-columns:1fr;gap:4px}.form-row>label{padding:0}.tabs{flex-wrap:wrap}.tabs button{flex:1 1 40%}.connection-card{padding:12px}.request-status{align-items:flex-start}}
 </style></head><body><main>
-<h1>提示词优化设置</h1><p>选好一个连接，再回到聊天输入框优化。这里的配置只影响提示词优化器。</p>
-<div id="notice" role="status" aria-live="polite">正在读取设置…</div><button id="cancelRequest" type="button" hidden>取消请求</button>
+<h1>提示词优化设置</h1><p>设置优化用的模型、参考内容和结果处理方式，只影响提示词优化器。</p>
+<div class="connection-card"><h2>Codex 输入框<span id="bridgeLabel" class="connection-badge">正在读取状态</span></h2><p id="bridgeStatus" role="status"></p>
+<div class="actions"><button id="enableBridge" type="button" class="primary" disabled>连接 Codex 输入框</button><button id="disableBridge" type="button" disabled>断开连接并恢复原文件</button><button id="refreshBridge" type="button" disabled>刷新状态</button></div>
+<p><small>连接会备份并修改已适配的 Codex 文件，断开后恢复原文件。操作后请保存草稿并手动重新加载窗口。</small></p></div>
+<div class="request-status"><div id="notice" role="status" aria-live="polite">正在读取设置…</div><button id="cancelRequest" type="button" hidden>取消请求</button></div>
+<nav class="tabs" role="tablist" aria-label="优化设置分区"><button id="tab-common" type="button" role="tab" aria-selected="true" aria-controls="panel-common" data-tab="common">常用</button><button id="tab-connections" type="button" role="tab" aria-selected="false" aria-controls="panel-connections" data-tab="connections" tabindex="-1">模型与连接</button><button id="tab-templates" type="button" role="tab" aria-selected="false" aria-controls="panel-templates" data-tab="templates" tabindex="-1">模板管理</button><button id="tab-advanced" type="button" role="tab" aria-selected="false" aria-controls="panel-advanced" data-tab="advanced" tabindex="-1">高级</button></nav>
 <fieldset id="controls" disabled>
-<section><h2>用哪个 AI</h2><p class="value" id="activeModel"></p><p id="activeEffort"></p>
+<div id="panel-common" class="tab-panel" role="tabpanel" aria-labelledby="tab-common" tabindex="0">
+<section><h2>正在使用的模型</h2><p class="section-note">这里的偏好会自动保存；切换连接和模板时，点击对应的“使用”按钮。</p><div class="summary-card"><p class="value" id="activeModel"></p><p id="activeEffort"></p></div>
+<div class="form-row"><label for="quickConnection">模型连接</label><div><select id="quickConnection"></select><div class="actions compact-actions"><button id="activateQuickConnection" type="button">使用所选连接</button><button id="quickModel" type="button">更换模型</button><button type="button" data-open-tab="connections">管理连接</button></div></div></div>
+<div class="form-row"><label for="quickEffort">思考程度</label><div><select id="quickEffort"></select><p id="quickEffortHint"></p></div></div>
+<div class="form-row"><label for="quickTemplate">优化模板</label><div><select id="quickTemplate"></select><div class="actions compact-actions"><button id="activateQuickTemplate" type="button">使用所选模板</button><button type="button" data-open-tab="templates">管理模板</button></div></div></div></section>
+<section><h2>优化时参考什么</h2>
+<div class="form-row"><label for="contextEnabled">参考内容</label><div><select id="contextEnabled"><option value="false">仅优化当前草稿</option><option value="true">结合当前对话优化</option></select><p>结合对话时，会参考当前窗口的近期聊天，帮助理解“这个”“继续”等说法。</p></div></div>
+<div class="row" id="recentTurnsRow" hidden><label for="recentTurns">参考最近几轮聊天<br><small>一问一答算一轮，轮数越多，发送内容也越多。</small></label><input id="recentTurns" type="number" min="1" max="30" step="1"></div>
+<div class="field"><input id="includeImages" type="checkbox"><label for="includeImages">优化时发送图片<p id="imageHelp"></p></label></div></section>
+<section><h2>拿到结果后怎么用</h2>
+<div class="form-row"><label for="autoApply">结果处理</label><div><select id="autoApply"><option value="false">先预览，再应用到输入框</option><option value="true">优化后直接填回输入框</option></select><p>先预览时可补充要求继续优化。直接填回时仍可恢复原文，两种方式都不会自动发送聊天消息。</p></div></div>
+<div class="field"><input id="historyEnabled" type="checkbox"><label for="historyEnabled">保存优化记录<p>在本机保留最近 50 条已应用的原文和结果，不保存图片。</p></label></div>
+<div class="actions"><button id="history" type="button">查看优化记录</button></div></section>
+</div>
+<div id="panel-connections" class="tab-panel" role="tabpanel" aria-labelledby="tab-connections" tabindex="0" hidden>
+<section><h2>模型与连接</h2><p class="section-note">已登录账号使用本机 Codex 或 Claude Code；第三方服务通过 API 连接。表单改动需点击“保存并使用”。</p>
 <div class="row"><label for="savedConnections">已保存的连接</label><select id="savedConnections" aria-label="已保存的连接"></select></div>
 <div class="actions"><button id="useConnection" type="button">使用此连接</button><button id="newConnection" type="button">新建 API 连接</button><button id="configure" type="button">使用已登录账号</button></div>
 <p>已登录账号支持 Codex 和 Claude Code，无需填写密钥。自己的模型服务在下面配置。</p>
@@ -77,13 +97,15 @@ button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visi
 </div>
 <div class="form-row"><label for="model">模型</label><div><input id="model" type="text" list="modelChoices" maxlength="200" placeholder="获取模型后搜索选择，也可直接填写模型 ID"><datalist id="modelChoices"></datalist><p id="modelHint"></p></div></div>
 <div class="form-row"><label for="reasoningEffort">思考程度</label><div><select id="reasoningEffort"></select><p id="effortHint"></p></div></div>
-<div class="field"><input id="supportsImages" type="checkbox"><label for="supportsImages">这个模型能看图片<p id="capabilityHint">服务没有提供能力信息时，请按服务商说明确认。</p></label></div>
+<p id="capabilityHint">服务没有提供能力信息时，请按服务商说明确认。</p><div class="field" id="manualImageCapability"><input id="supportsImages" type="checkbox"><label for="supportsImages">我确认这个模型支持图片<p>仅在服务未提供图片能力目录时手动确认；是否发送图片在“常用”中选择。</p></label></div>
 <details id="compatibilityOptions"><summary>接口兼容选项（通常不用改）</summary><div class="form-row"><label for="tokenLimitParameter">输出上限参数</label><div><select id="tokenLimitParameter"><option value="max_tokens">max_tokens（多数兼容服务）</option><option value="max_completion_tokens">max_completion_tokens（OpenAI 新式推理接口）</option></select><p>只有服务商要求另一种格式时才调整；测试调用与实际优化使用相同格式。</p></div></div></details>
 <div class="actions"><button id="saveConnection" type="button" class="primary">保存并使用</button><button id="discardChanges" type="button">放弃修改并重新读取</button><button id="removeConnection" type="button">删除此连接</button></div>
-<p id="draftHint">连接配置需点击“保存并使用”；下方优化偏好会自动保存。</p>
+<p id="draftHint" role="status">连接配置需点击“保存并使用”。</p>
 <div id="apiChecks"><div class="actions"><button id="testConnection" type="button">测试模型调用（可能产生费用）</button><button id="balance" type="button">查询余额</button></div><p>测试使用一条独立短消息，不读取聊天、草稿或图片；获取模型成功不代表所选模型一定可调用。</p><p class="result" id="testResult" role="status"></p><p class="result" id="balanceResult" role="status"></p></div>
 </section>
-<section><h2>怎样优化</h2><p class="value" id="activeTemplate"></p><p>模板决定改写的格式和重点，可以配合任意模型连接使用。默认“基础优化”尽量少改；“需求拆解”会整理目标、范围、约束与验收。</p>
+</div>
+<div id="panel-templates" class="tab-panel" role="tabpanel" aria-labelledby="tab-templates" tabindex="0" hidden>
+<section><h2>模板管理</h2><p class="value" id="activeTemplate"></p><p>模板决定改写的格式和重点，可以配合任意模型连接使用。默认“基础优化”尽量少改；“需求拆解”会整理目标、范围、约束与验收。</p>
 <div class="form-row"><label for="templates">优化模板</label><select id="templates"></select></div>
 <div class="actions"><button id="useTemplate" type="button">使用此模板</button><button id="copyTemplate" type="button">复制为自定义</button><button id="newTemplate" type="button">新建模板</button></div>
 <details id="templateEditor"><summary>查看 / 编辑模板内容</summary>
@@ -97,25 +119,20 @@ button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visi
 <div class="actions"><button id="saveTemplate" type="button" class="primary">保存并使用模板</button><button id="reloadTemplates" type="button">放弃模板修改并重新读取</button><button id="removeTemplate" type="button">删除自定义模板</button></div>
 <div class="actions"><button id="importTemplates" type="button">导入模板 JSON</button><button id="exportTemplate" type="button">导出当前模板</button></div><p>导入支持上游的模板包及模板数组，不覆盖已有模板；导出不含变量值、模型连接和密钥。</p>
 </section>
-<section><h2>优化时参考什么</h2>
-<div class="field"><input id="contextEnabled" type="checkbox"><label for="contextEnabled">参考前面的聊天<p>结合当前窗口最近几轮聊天理解“这个”“继续”。关闭后只优化输入框里的文字。</p></label></div>
-<div class="field"><input id="includeImages" type="checkbox"><label for="includeImages">让 AI 一起看图片<p id="imageHelp"></p></label></div>
-<div class="row"><label for="recentTurns">参考最近几轮聊天<br><small>一问一答算一轮；轮数越多，发送的内容也越多。</small></label><input id="recentTurns" type="number" min="1" max="30" step="1"></div>
-</section>
-<section><h2>拿到结果后怎么用</h2>
-<div class="field"><input id="autoApply" type="checkbox"><label for="autoApply">优化完直接填回输入框<p>开启后省去预览，仍可一键恢复。关闭时先看预览，可补充要求继续优化。都不会自动发送消息。</p></label></div>
-<div class="field"><input id="historyEnabled" type="checkbox"><label for="historyEnabled">保存优化记录<p>在本机保存最近 50 条已应用的原文和结果，不保存图片。</p></label></div>
-</section>
-<section><h2>入口和等待时间</h2>
-<div class="row"><label for="uiMode">优化按钮放在哪里<br><small>底部状态栏对聊天窗口影响较小；修改后需重新加载 VS Code。</small></label><select id="uiMode"><option value="native">VS Code 底部状态栏</option><option value="inline">聊天输入框里</option></select></div>
+</div>
+<div id="panel-advanced" class="tab-panel" role="tabpanel" aria-labelledby="tab-advanced" tabindex="0" hidden>
+<section><h2>入口和等待时间</h2><p class="section-note">通常保持当前值即可；这里的偏好会自动保存。</p>
+<div class="row"><label for="uiMode">聊天输入框里的快捷按钮<br><small>底部入口会一直保留；修改后需重新加载 VS Code。</small></label><select id="uiMode"><option value="native">关闭，使用底部入口（推荐）</option><option value="inline">显示输入框快捷按钮</option></select></div>
 <div class="row"><label for="timeoutSeconds">最多等模型多少秒<br><small>超时后停止等待，原输入保留。</small></label><input id="timeoutSeconds" type="number" min="5" max="300" step="1"></div>
-<details><summary>高级：Codex 接入与更多设置</summary><p id="bridgeStatus"></p><p>启用会备份并修改已适配的 Codex 文件；停用会按备份恢复。操作后请保存工作并手动重新加载窗口。</p><div class="actions"><button id="enableBridge" type="button">启用 Codex 接入</button><button id="disableBridge" type="button">停用并恢复 Codex 文件</button><button id="advanced" type="button">更多 VS Code 设置</button></div></details>
+<div class="row"><label for="maxContextChars">最多参考多少字<br><small>超出时优先保留最近的聊天内容。</small></label><input id="maxContextChars" type="number" min="1000" max="100000" step="1"></div>
+<div class="actions"><button id="advanced" type="button">客户端路径等 VS Code 高级设置</button></div>
 </section>
-<div class="actions"><button id="history" type="button">查看优化记录</button></div><p>使用：先点聊天输入框，再按 Ctrl+Alt+O 优化；Ctrl+Alt+Z 恢复上一次原文。</p>
+</div>
+<p>快捷使用：先点 Codex 输入框，再按 Ctrl+Alt+O 优化；Ctrl+Alt+Z 恢复上一次原文。</p>
 </fieldset></main><script nonce="${nonce}">
 const api = acquireVsCodeApi();
 const $ = id => document.getElementById(id);
-const labels = { auto:'按默认方式', none:'不额外思考', minimal:'少量思考', low:'简单思考', medium:'适中思考', high:'深入思考', xhigh:'更深入思考', max:'最高强度思考' };
+const labels = { auto:'按默认方式', none:'不额外思考', minimal:'少量思考', low:'简单思考', medium:'适中思考', high:'深入思考', xhigh:'更深入思考', max:'最高强度思考', ultra:'极高强度思考' };
 const manualLevels = { deepseek:['none','low','high','max'], anthropic:['none','low','medium','high','xhigh','max'], 'openai-compatible':['none','minimal','low','medium','high','xhigh','max'] };
 const apiProviders = Object.keys(manualLevels);
 let state;
@@ -128,9 +145,75 @@ let templateId = '';
 let templateRevision;
 let templateDirty = false;
 let templateValues = new Map();
+const tabNames = ['common','connections','templates','advanced'];
+function showTab(name, focus = false) {
+  if (!tabNames.includes(name)) return;
+  for (const current of tabNames) {
+    const selected = current === name;
+    $('tab-' + current).setAttribute('aria-selected', String(selected));
+    $('tab-' + current).tabIndex = selected ? 0 : -1;
+    $('panel-' + current).hidden = !selected;
+  }
+  if (focus) $('tab-' + name).focus();
+}
+for (const name of tabNames) {
+  $('tab-' + name).addEventListener('click', () => showTab(name));
+  $('tab-' + name).addEventListener('keydown', event => {
+    if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+    event.preventDefault();
+    const index = tabNames.indexOf(name);
+    showTab(event.key === 'Home' ? tabNames[0] : event.key === 'End' ? tabNames.at(-1) : tabNames[(index + (event.key === 'ArrowRight' ? 1 : -1) + tabNames.length) % tabNames.length], true);
+  });
+}
+for (const button of document.querySelectorAll('[data-open-tab]')) button.addEventListener('click', () => showTab(button.dataset.openTab, true));
+function draftLabels() {
+  $('tab-connections').textContent = '模型与连接' + (dirty ? ' · 未保存' : '');
+  $('tab-templates').textContent = '模板管理' + (templateDirty ? ' · 未保存' : '');
+}
+function renderBridge() {
+  if (state) { $('bridgeLabel').textContent = state.bridgeLabel; $('bridgeStatus').textContent = state.bridgeStatus; }
+  $('enableBridge').disabled = busy || !state?.canEnable;
+  $('disableBridge').disabled = busy || !state?.canDisable;
+  $('refreshBridge').disabled = busy;
+}
+function quickButtons() {
+  $('activateQuickConnection').disabled = !state || !$('quickConnection').value || $('quickConnection').value === state.activeConnectionId;
+  $('activateQuickTemplate').disabled = !state || !$('quickTemplate').value || $('quickTemplate').value === state.activeTemplateId;
+  const pendingConnection = state && $('quickConnection').value !== (state.activeConnectionId || '');
+  $('quickModel').disabled = pendingConnection;
+  $('quickEffort').disabled = !state?.activeConnectionId || pendingConnection || $('quickEffort').options.length < 2;
+}
+function renderCommon(first, action) {
+  const connectionValue = $('quickConnection').value;
+  const templateValue = $('quickTemplate').value;
+  $('quickConnection').replaceChildren(new Option('请选择已保存的连接',''), ...state.connections.map(item => new Option(item.name + (item.id === state.activeConnectionId ? '（正在使用）' : ''),item.id)));
+  const changedConnection = ['configure','activateConnection','saveConnection','removeConnection'].includes(action);
+  $('quickConnection').value = first || changedConnection || !state.connections.some(item => item.id === connectionValue) ? state.activeConnectionId || '' : connectionValue;
+  const profile = state.connections.find(item => item.id === state.activeConnectionId);
+  $('quickModel').textContent = profile ? '更换模型' : '添加模型连接';
+  const info = profile?.modelMetadata?.id === profile?.model ? profile?.modelMetadata : undefined;
+  const known = Array.isArray(info?.levels);
+  const levels = (known ? info.levels : manualLevels[profile?.provider] || []).filter(level => typeof level === 'string');
+  const effort = $('quickEffort');
+  effort.replaceChildren(new Option(profile?.provider === 'deepseek' ? '默认：快速改写（关闭思考）' : profile?.provider === 'claude' ? '跟随 Claude Code 当前设置' : '跟随模型或服务默认','auto'), ...levels.map(level => new Option(labels[level] || level,level)));
+  if (profile?.reasoningEffort && profile.reasoningEffort !== 'auto' && !levels.includes(profile.reasoningEffort)) {
+    const option = new Option((labels[profile.reasoningEffort] || profile.reasoningEffort) + '（目录未确认）',profile.reasoningEffort); option.disabled = true; effort.add(option);
+  }
+  effort.value = profile?.reasoningEffort || 'auto';
+  let effortHint = '当前连接未保存能力目录，请更换模型时重新读取。';
+  if (!profile) effortHint = '先添加并使用一组模型连接。';
+  else if (known) effortHint = levels.length ? '档位来自当前模型目录，修改后自动保存；更深入的思考通常等待更久。' : '这个模型没有提供可选的思考档位，按默认方式调用。';
+  else if (apiProviders.includes(profile.provider)) effortHint = '服务未确认各档位，按接口协议手动设置；不确定时保持默认。';
+  else if (profile.provider === 'claude' && !profile.model) effortHint = '正在跟随 Claude Code 当前模型和思考设置。';
+  $('quickEffortHint').textContent = effortHint;
+  $('quickTemplate').replaceChildren(...state.templates.map(item => new Option(item.name + (item.id === state.activeTemplateId ? '（正在使用）' : ''),item.id)));
+  const changedTemplate = ['useTemplate','saveTemplate','removeTemplate'].includes(action);
+  $('quickTemplate').value = first || changedTemplate || !state.templates.some(item => item.id === templateValue) ? state.activeTemplateId : templateValue;
+  quickButtons();
+}
 function savedTemplate() { return state?.templates.find(item => item.id === templateId); }
 function templateForm() { return { id:templateId || undefined, name:$('templateName').value, description:$('templateDescription').value, category:$('templateCategory').value, systemPrompt:$('templateSystem').value, userTemplate:$('templateUser').value, variables:Object.fromEntries(templateValues) }; }
-function templateChanged() { templateDirty = true; $('templateHint').textContent = '模板或变量有未保存改动，点击“保存并使用模板”后生效。'; templateButtons(); }
+function templateChanged() { templateDirty = true; $('templateHint').textContent = '模板或变量有未保存改动，点击“保存并使用模板”后生效。'; templateButtons(); draftLabels(); }
 function templateButtons() {
   const item = savedTemplate();
   $('saveTemplate').disabled = item?.isBuiltin === true;
@@ -167,8 +250,9 @@ function loadTemplate(id) {
   $('templateHint').textContent = (item?.description ? item.description + '。' : '') + (item?.isBuiltin ? '内置模板只读，点击“复制为自定义”后可以修改。' : '模板需点击“保存并使用模板”后才生效。');
   $('templateEditor').open = !item?.isBuiltin;
   renderTemplateVariables(); templateButtons();
+  draftLabels();
 }
-function cleanTemplate() { if (!templateDirty) return true; notice('模板有未保存改动，请先保存，或放弃模板修改后重新读取。',true); return false; }
+function cleanTemplate() { if (!templateDirty) return true; showTab('templates', true); notice('模板有未保存改动，请先保存，或放弃模板修改后重新读取。',true); return false; }
 function saved() { return state?.connections.find(item => item.id === selectedId); }
 function isApi() { return apiProviders.includes($('provider').value); }
 function notice(text, error = false) { $('notice').textContent = text; $('notice').className = error ? 'error' : ''; }
@@ -177,6 +261,7 @@ function send(action, extra = {}) {
   if (busy) return;
   busy = true;
   $('controls').disabled = true;
+  renderBridge();
   $('cancelRequest').hidden = !['models','test','balance'].includes(action);
   notice(({ models:'正在获取模型列表…', test:'正在使用当前表单配置测试模型调用…', balance:'正在查询此连接的余额…', configure:'请在弹出的选项中选择已登录账号和模型…' })[action] || '正在处理…');
   api.postMessage({ action, ...extra });
@@ -187,6 +272,7 @@ function changed() {
   $('testResult').textContent = '';
   $('balanceResult').textContent = '';
   renderAvailability();
+  draftLabels();
 }
 function metadata() {
   const data = form();
@@ -208,9 +294,10 @@ function renderCapabilities(effort) {
   select.value = current;
   $('effortHint').textContent = known ? '档位来自此模型的能力目录；更深入的思考通常等待更久。' : isApi() ? '服务未提供可识别的思考能力信息。以下是按接口协议手动设置的档位，不保证当前模型全部支持；不确定时保持默认并测试。' : '当前连接未保存思考能力目录；可点“使用已登录账号”重新选择并读取。';
   const imageKnown = typeof info?.supportsImages === 'boolean';
+  $('manualImageCapability').hidden = imageKnown;
   $('supportsImages').disabled = imageKnown;
   if (imageKnown) $('supportsImages').checked = info.supportsImages;
-  $('capabilityHint').textContent = imageKnown ? (info.supportsImages ? '模型能力目录确认支持图片。' : '模型能力目录未提供图片支持。') : '能力未知；请按服务商说明手动确认，勾选后才会向此模型发送图片。';
+  $('capabilityHint').textContent = imageKnown ? (info.supportsImages ? '模型能力：支持图片。是否发送图片可在“常用”中选择。' : '模型能力：当前目录未提供图片支持，优化时只发送文字。') : '模型图片能力未知，请按服务商说明确认；原聊天附件始终保留。';
   $('modelHint').textContent = isApi() ? (models.length ? '已获取 ' + models.length + ' 个模型，可输入名称搜索；也可手动填写 ID。' : '可点击获取模型；接口不开放列表时，直接填写服务商提供的模型 ID。') : '模型由官方客户端提供；更改模型请点“使用已登录账号”。';
 }
 function renderAvailability() {
@@ -226,6 +313,7 @@ function renderAvailability() {
   let canBalance = false;
   try { const url = new URL($('apiBaseUrl').value); canBalance = $('provider').value === 'deepseek' && url.origin === 'https://api.deepseek.com'; } catch {}
   $('balance').disabled = !canBalance;
+  $('balance').hidden = !canBalance;
   if (!canBalance) $('balanceResult').textContent = '此服务暂不支持余额查询；目前仅接入 DeepSeek 官方接口。';
 }
 function loadForm(id) {
@@ -244,14 +332,16 @@ function loadForm(id) {
   $('modelChoices').replaceChildren();
   dirty = false;
   draftRevision = state.connectionsRevision;
-  $('draftHint').textContent = '连接配置需点击“保存并使用”；下方优化偏好会自动保存。';
+  $('draftHint').textContent = '连接配置需点击“保存并使用”；“常用”和“高级”的偏好会自动保存。';
   $('testResult').textContent = '';
   $('balanceResult').textContent = '';
   renderCapabilities(profile?.reasoningEffort || 'auto');
   renderAvailability();
+  draftLabels();
 }
 function cleanDraft() {
   if (!dirty) return true;
+  showTab('connections', true);
   notice('有未保存的连接改动。请先保存，或点击“放弃修改并重新读取”。', true);
   return false;
 }
@@ -260,7 +350,7 @@ window.addEventListener('message', event => {
   if (!reply || typeof reply.action !== 'string') return;
   busy = false;
   $('cancelRequest').hidden = true;
-  if (!reply.state) { notice(reply.error || '无法读取设置，请关闭后重新打开。', true); return; }
+  if (!reply.state) { $('refreshBridge').disabled = false; notice(reply.error || '无法读取设置，请点击“刷新状态”重试。', true); return; }
   const first = !state;
   state = reply.state;
   $('controls').disabled = false;
@@ -271,6 +361,7 @@ window.addEventListener('message', event => {
   for (const item of state.connections) picker.add(new Option(item.name + (item.id === state.activeConnectionId ? '（正在使用）' : ''), item.id));
   picker.value = selectedId;
   if (first || Object.prototype.hasOwnProperty.call(reply, 'selectedId')) loadForm(reply.selectedId === null ? '' : reply.selectedId || state.activeConnectionId || '');
+  else if (reply.action === 'saveEffort' && !dirty) loadForm(selectedId);
   const templatePicker = $('templates');
   templatePicker.replaceChildren(new Option('新建自定义模板…',''));
   for (const item of state.templates) templatePicker.add(new Option((item.category || '自定义') + ' · ' + item.name + (item.id === state.activeTemplateId ? '（正在使用）' : ''),item.id));
@@ -285,16 +376,37 @@ window.addEventListener('message', event => {
   if (reply.test) $('testResult').textContent = (reply.test.truncated ? '模型已响应，测试输出达到上限' : '模型调用成功') + ' · ' + reply.test.model + ' · ' + (reply.test.modelMs / 1000).toFixed(1) + ' 秒';
   if (reply.balance) $('balanceResult').textContent = reply.balance.balances.map(item => item.currency + ' ' + item.total).join('；') + (reply.balance.available ? '' : ' · 服务返回余额不足') + ' · 查询于 ' + new Date(reply.balance.checkedAt).toLocaleString();
   if (reply.error && ['test','balance'].includes(reply.action)) $(reply.action === 'test' ? 'testResult' : 'balanceResult').textContent = reply.error;
-  for (const name of ['contextEnabled','autoApply','historyEnabled']) $(name).checked = state[name];
+  $('historyEnabled').checked = state.historyEnabled;
+  for (const name of ['contextEnabled','autoApply']) $(name).value = String(state[name]);
+  $('recentTurnsRow').hidden = !state.contextEnabled;
   $('includeImages').checked = state.includeImages;
   $('includeImages').disabled = !state.supportsImages;
   $('imageHelp').textContent = state.supportsImages ? '将可读取的图片交给当前启用的模型；关闭后，原聊天附件仍保留。' : '当前启用的连接按纯文字处理，不发送图片；原聊天附件仍保留。';
-  for (const name of ['recentTurns','timeoutSeconds','uiMode']) $(name).value = state[name];
-  $('bridgeStatus').textContent = state.bridgeStatus;
-  $('enableBridge').disabled = !state.canEnable;
-  $('disableBridge').disabled = !state.canDisable;
+  for (const name of ['recentTurns','maxContextChars','timeoutSeconds','uiMode']) $(name).value = state[name];
+  renderBridge();
+  renderCommon(first, reply.action);
   renderAvailability();
-  notice(reply.error || reply.notice || '选择连接后可配置；优化偏好更改后会自动保存。', Boolean(reply.error));
+  notice(reply.error || reply.notice || '常用偏好自动保存；连接和模板编辑后点击“保存并使用”。', Boolean(reply.error));
+});
+$('quickConnection').addEventListener('change', quickButtons);
+$('quickTemplate').addEventListener('change', quickButtons);
+$('activateQuickConnection').addEventListener('click', () => { if (cleanDraft()) send('activateConnection', { id:$('quickConnection').value, connectionsRevision:state.connectionsRevision }); });
+$('quickModel').addEventListener('click', () => {
+  if (!cleanDraft()) return;
+  const profile = state.connections.find(item => item.id === state.activeConnectionId);
+  if (['codex','claude'].includes(profile?.provider)) send('configure', { id:profile.id, reuseSource:true });
+  else { loadForm(profile?.id || ''); showTab('connections', true); $(profile ? 'model' : 'connectionName').focus(); }
+});
+$('quickEffort').addEventListener('change', () => {
+  if (!cleanDraft()) { $('quickEffort').value = state.connections.find(item => item.id === state.activeConnectionId)?.reasoningEffort || 'auto'; return; }
+  send('saveEffort', { id:state.activeConnectionId, value:$('quickEffort').value, connectionsRevision:state.connectionsRevision });
+});
+$('activateQuickTemplate').addEventListener('click', () => {
+  if (!cleanTemplate()) return;
+  const item = state.templates.find(template => template.id === $('quickTemplate').value);
+  if (!item) return;
+  if (item.variableNames.some(name => !item.variables[name]?.trim())) { showTab('templates', true); loadTemplate(item.id); notice('请先填写这个模板的变量，再使用。',true); return; }
+  send('useTemplate', { id:item.id, variables:item.variables, templatesRevision:state.templatesRevision });
 });
 $('savedConnections').addEventListener('change', () => { if (cleanDraft()) loadForm($('savedConnections').value); else $('savedConnections').value = selectedId; });
 $('newConnection').addEventListener('click', () => { if (cleanDraft()) loadForm(''); });
@@ -334,7 +446,13 @@ for (const id of ['connectionName','reasoningEffort','supportsImages','tokenLimi
 for (const action of ['history','advanced']) $(action).addEventListener('click', () => send(action));
 $('enableBridge').addEventListener('click', () => send('bridge', { enabled:true }));
 $('disableBridge').addEventListener('click', () => send('bridge', { enabled:false }));
-for (const name of ['contextEnabled','includeImages','autoApply','historyEnabled','recentTurns','timeoutSeconds','uiMode']) $(name).addEventListener('change', () => send('save', { name, value:$(name).type === 'checkbox' ? $(name).checked : $(name).type === 'number' ? Number($(name).value) : $(name).value, configurationId:state.configurationId }));
+$('refreshBridge').addEventListener('click', () => send('ready'));
+for (const name of ['contextEnabled','includeImages','autoApply','historyEnabled','recentTurns','maxContextChars','timeoutSeconds','uiMode']) $(name).addEventListener('change', () => {
+  const field = $(name);
+  if (!field.reportValidity()) return;
+  const value = ['contextEnabled','autoApply'].includes(name) ? field.value === 'true' : field.type === 'checkbox' ? field.checked : field.type === 'number' ? Number(field.value) : field.value;
+  send('save', { name, value, configurationId:state.configurationId });
+});
 send('ready');
 </script></body></html>`;
 }

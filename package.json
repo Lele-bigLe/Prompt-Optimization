@@ -14,13 +14,13 @@
   "categories": ["Other"],
   "contributes": {
     "commands": [
-      { "command": "codexPromptOptimizer.settings", "title": "Codex 提示词优化：打开设置" },
-      { "command": "codexPromptOptimizer.configure", "title": "Codex 提示词优化：选择连接" },
-      { "command": "codexPromptOptimizer.optimize", "title": "Codex 提示词优化：优化当前输入" },
-      { "command": "codexPromptOptimizer.undo", "title": "Codex 提示词优化：恢复原文" },
-      { "command": "codexPromptOptimizer.enableBridge", "title": "Codex 提示词优化：启用 Codex 接入" },
-      { "command": "codexPromptOptimizer.disableBridge", "title": "Codex 提示词优化：停用并恢复 Codex 文件" },
-      { "command": "codexPromptOptimizer.history", "title": "Codex 提示词优化：查看优化记录" }
+      { "command": "codexPromptOptimizer.settings", "title": "提示词优化：打开设置" },
+      { "command": "codexPromptOptimizer.configure", "title": "提示词优化：选择模型连接" },
+      { "command": "codexPromptOptimizer.optimize", "title": "提示词优化：优化当前草稿" },
+      { "command": "codexPromptOptimizer.undo", "title": "提示词优化：恢复原文" },
+      { "command": "codexPromptOptimizer.enableBridge", "title": "提示词优化：连接 Codex 输入框" },
+      { "command": "codexPromptOptimizer.disableBridge", "title": "提示词优化：断开连接并恢复原文件" },
+      { "command": "codexPromptOptimizer.history", "title": "提示词优化：查看优化记录" }
     ],
     "menus": {
       "commandPalette": [
@@ -34,13 +34,13 @@
       "properties": {
         "codexPromptOptimizer.provider": {
           "type": "string", "enum": ["choose", "codex", "claude", "deepseek", "anthropic", "openai-compatible"], "default": "choose",
-          "deprecationMessage": "仅用于迁移旧连接。请在底部“优化设置”管理连接。",
+          "deprecationMessage": "仅用于迁移旧连接。请从底部“优化菜单”打开设置，管理模型连接。",
           "description": "用哪个 AI 优化这段文字。建议打开“提示词优化：打开设置”，选择已登录的账号或自己的模型服务。"
         },
         "codexPromptOptimizer.uiMode": {
           "type": "string", "enum": ["native", "inline"], "default": "native",
-          "enumDescriptions": ["把按钮放在 VS Code 底部，对聊天窗口影响较小。", "把按钮放在聊天输入框里。"],
-          "description": "优化按钮放在哪里。修改后重新加载 VS Code 才会改变位置。"
+          "enumDescriptions": ["使用 VS Code 底部常驻入口，对聊天窗口影响较小。", "同时在聊天输入框里显示快捷按钮，底部入口保留。"],
+          "description": "是否在聊天输入框中显示快捷按钮。修改后重新加载 VS Code 生效；底部入口始终保留。"
         },
         "codexPromptOptimizer.codexExecutable": { "type": "string", "default": "", "description": "一般留空，自动使用官方扩展自带的 Codex。只有自动找不到程序时，才填写 codex.exe 的完整路径。" },
         "codexPromptOptimizer.claudeExecutable": { "type": "string", "default": "", "description": "一般留空，自动查找已安装的 Claude Code。只有自动找不到时，才填写 claude.exe 的完整路径。" },

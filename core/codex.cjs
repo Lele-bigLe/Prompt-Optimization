@@ -18,6 +18,7 @@ class CodexAgent {
     if (this.starting) return this.starting;
     const starting = (async () => {
       await fs.mkdir(this.cwd, { recursive: true });
+      if (this.starting !== connection) throw new Error('Codex 连接已取消。');
       const process = new LineProcess(this.executable, [
         '-c', 'features.hooks=false', '-c', 'features.shell_tool=false',
         '-c', 'features.unified_exec=false', '-c', 'project_doc_max_bytes=0',
@@ -75,6 +76,13 @@ class CodexAgent {
     const job = this.jobs.get(params?.threadId);
     if (!job) return;
     if (message.method === 'turn/started') job.turnId = params.turn.id;
+    if (message.method === 'item/started' && params.item?.type === 'agentMessage' && params.item.phase !== 'commentary') {
+      job.previewItemId = params.item.id;
+      job.onText?.({ reset: true, text: '' });
+    }
+    if (message.method === 'item/agentMessage/delta' && job.previewItemId && params.itemId === job.previewItemId && typeof params.delta === 'string') {
+      job.onText?.({ text: params.delta });
+    }
     if (message.method === 'item/completed' && params.item?.type === 'agentMessage') {
       if (params.item.phase === 'final_answer') job.finalText = params.item.text;
       job.lastText = params.item.text;
@@ -116,7 +124,7 @@ class CodexAgent {
     return { account, configuredModel: this.configuredModel, models };
   }
 
-  async optimize(input, config, signal, session = {}) {
+  async optimize(input, config, signal, session = {}, onText) {
     const prepared = prepareInput(input, config);
     const started = performance.now();
     await this.connect();
@@ -149,7 +157,7 @@ class CodexAgent {
       job?.reject(new Error(signal?.aborted ? '已取消优化。' : 'Codex 优化超时。'));
     };
     try {
-      const completed = new Promise((resolve, reject) => { job = { resolve, reject, turnId: null, cancelled: false, finalText: '', lastText: '' }; });
+      const completed = new Promise((resolve, reject) => { job = { resolve, reject, turnId: null, cancelled: false, finalText: '', lastText: '', onText }; });
       this.jobs.set(threadId, job);
       signal?.addEventListener('abort', cancel, { once: true });
       timer = setTimeout(cancel, Math.max(1, config.timeoutSeconds * 1000 - (performance.now() - started)));

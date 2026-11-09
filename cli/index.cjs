@@ -10,6 +10,8 @@ const { randomUUID, randomBytes, timingSafeEqual } = require('node:crypto');
 const store = require('./store.cjs');
 const { CodexAgent } = require('../core/codex.cjs');
 const { builtins } = require('../core/templates.cjs');
+const { display, configSummary } = require('./panel.cjs');
+const unsupportedOptions = /^(?:--(?:remote|remote-auth-token-env|no-daemon|worktree|profile)(?:=|$)|-p(?:[^-]|$))/;
 
 const usage = `Codex 提示词优化 CLI（Windows）
 
@@ -17,7 +19,9 @@ const usage = `Codex 提示词优化 CLI（Windows）
   node cli/index.cjs models [--codex 程序绝对路径]
   node cli/index.cjs templates
   node cli/index.cjs config [优化选项]
+  node cli/index.cjs launch [--codex 程序绝对路径] -- [Codex 原生参数]
   node cli/index.cjs sessions
+  node cli/index.cjs settings [--session 入口ID]
   node cli/index.cjs continue --instructions "再简洁一些" [--session 入口ID]
   node cli/index.cjs undo [--session 入口ID]
   node cli/index.cjs cancel [--session 入口ID]
@@ -25,12 +29,15 @@ const usage = `Codex 提示词优化 CLI（Windows）
 
 优化选项：--model 模型ID --effort auto|low|medium|high|xhigh 等
           --context on|off --timeout 秒数 --template 模板ID
+          --mode direct|preview
 启动选项：--codex codex.exe绝对路径 --cwd 工作目录
+查询选项：config / templates / sessions / last-error 可加 --json
 
-在启动后的 Codex 中写草稿，按 Ctrl+G 后台优化，结果仅回填，不发送。
-再次按 Ctrl+G：草稿与聊天未变时沿用独立优化会话继续改善。
-continue / undo 在另一个终端执行，再回到对应 Codex 按 Ctrl+G 生效。
-cancel 可直接取消正在进行的优化，不需要再次按快捷键。
+默认写好草稿后按 Ctrl+G，优化结果直接回填，不发送；再次按继续优化。
+空输入框按 Ctrl+G 直接进入设置；生成中按 S 可停止生成并调整设置。
+settings 可为已有草稿准备设置入口；--mode preview 改为先预览再应用。
+接入 PowerShell 后仍使用 codex / codex resume 启动。
+continue / undo / cancel 保留为其他终端中的控制命令。
 首次使用请先在 cli 目录安装依赖；本版本不打开浏览器。
 `;
 
@@ -42,7 +49,49 @@ function overrides(values) {
     result.contextEnabled = values.context === 'on';
   }
   if (values.timeout !== undefined) result.timeoutSeconds = Number(values.timeout);
+  if (values.mode !== undefined) {
+    if (!['direct', 'preview'].includes(values.mode)) throw new Error('--mode 只能是 direct 或 preview。');
+    result.autoApply = values.mode === 'direct';
+  }
   return result;
+}
+
+function interactiveInvocation(args) {
+  const commands = new Set(['agents', 'exec', 'e', 'review', 'login', 'logout', 'mcp', 'plugin', 'app-server', 'remote-control', 'app', 'completion', 'update', 'doctor', 'sandbox', 'debug', 'apply', 'a', 'queue', 'archive', 'delete', 'migrate-rollouts', 'migrate-nfs-db', 'unarchive', 'cloud', 'exec-server', 'features', 'help']);
+  const values = new Set(['-c', '--config', '--enable', '--disable', '--remote', '--remote-auth-token-env', '-i', '--image', '-m', '--model', '--local-provider', '-p', '--profile', '-s', '--sandbox', '-C', '--cd', '--add-dir', '-a', '--ask-for-approval']);
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    if (argument === '--') return true;
+    if (values.has(argument)) { index++; continue; }
+    if (!argument.startsWith('-')) return !commands.has(argument);
+  }
+  return true;
+}
+
+async function forwardNative(executable, args) {
+  const child = spawn(executable, args, { stdio: 'inherit', shell: false, windowsHide: false });
+  const ignoreInterrupt = () => {};
+  const stop = () => child.kill();
+  process.on('SIGINT', ignoreInterrupt); process.once('SIGTERM', stop);
+  try {
+    process.exitCode = await new Promise((resolve, reject) => {
+      child.once('error', () => reject(new Error('无法启动官方 Codex，请检查程序路径。')));
+      child.once('exit', (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+    });
+  } finally { process.removeListener('SIGINT', ignoreInterrupt); process.removeListener('SIGTERM', stop); }
+}
+
+async function launch(values, args) {
+  const executable = await store.executableFor(values.codex);
+  if (args[0] === '--optimizer-off') return forwardNative(executable, args.slice(1));
+  const preview = args[0] === '--optimizer-preview';
+  if (preview) args = args.slice(1);
+  if (args.some(item => ['--help', '-h', '--version', '-V'].includes(item)) || !interactiveInvocation(args)) return forwardNative(executable, args);
+  if (args.some(item => unsupportedOptions.test(item))) {
+    process.stderr.write('本次参数暂未适配优化入口，使用官方 Codex 启动；本次会话不接入优化快捷键。\n');
+    return forwardNative(executable, args);
+  }
+  return start({ ...values, quiet: true }, args, store.validateConfig({ ...await store.settings(), ...(preview ? { autoApply: false } : {}) }));
 }
 
 function backendOptions(args, initialCwd) {
@@ -51,7 +100,7 @@ function backendOptions(args, initialCwd) {
   const withValue = new Set(['-c', '--config', '--enable', '--disable']);
   for (let index = 0; index < args.length; index++) {
     const argument = args[index];
-    if (/^--(?:remote|remote-auth-token-env|no-daemon|worktree|profile)(?:=|$)/.test(argument) || /^-p(?:[^-]|$)/.test(argument)) throw new Error('增强入口不支持再指定 remote、no-daemon、worktree 或 profile；请使用普通 Codex 执行这些操作。');
+    if (unsupportedOptions.test(argument)) throw new Error('增强入口不支持再指定 remote、no-daemon、worktree 或 profile；请使用普通 Codex 执行这些操作。');
     if (withValue.has(argument)) {
       if (!args[index + 1]) throw new Error(`${argument} 缺少值。`);
       config.push(argument, args[++index]);
@@ -88,9 +137,19 @@ function controlServer(runtime, run) {
         const expected = Buffer.from(run.token);
         if (token.length !== expected.length || !timingSafeEqual(token, expected)) throw new Error('连接认证失败。');
         if (message.action === 'status') respond(runtime.status());
-        else if (message.action === 'edit') respond(await runtime.edit(message.filename, controller.signal));
+        else if (message.action === 'review') {
+          socket.setTimeout(0);
+          const notify = event => {
+            if (socket.destroyed || socket.writableEnded) return;
+            if (socket.writableLength > 2 * 1024 * 1024) { controller.abort(); socket.destroy(); return; }
+            socket.write(JSON.stringify({ event }) + '\n');
+          };
+          respond(await runtime.openReview(message.filename, controller.signal, notify, message.direct === true));
+        }
+        else if (message.action === 'review-action') respond(runtime.action(message));
+        else if (message.action === 'review-models') respond(await runtime.modelOptions(message.reviewId));
         else if (message.action === 'cancel') respond(runtime.cancel());
-        else if (['undo', 'continue'].includes(message.action)) respond(runtime.queue(message.action, message.instructions));
+        else if (['undo', 'continue', 'settings'].includes(message.action)) respond(runtime.queue(message.action, message.instructions));
         else throw new Error('不支持的操作。');
       } catch (error) { respond(null, error); }
     });
@@ -126,7 +185,7 @@ async function start(values, codexArgs, config) {
     delete environment.CODEX_THREAD_ID; delete environment.CODEX_SESSION_ID;
     const editor = `"${process.execPath}" "${path.join(__dirname, 'editor.cjs')}"`;
     environment.VISUAL = editor; environment.EDITOR = editor;
-    process.stdout.write(`提示词优化入口：${id}\nCtrl+G 后台优化；再次按继续改善；结果不会自动发送。\n恢复和补充要求：在另一个终端执行 undo / continue，再按 Ctrl+G。\n`);
+    if (!values.quiet) process.stdout.write(`提示词优化入口：${id}\n${config.autoApply ? 'Ctrl+G 优化并直接回填；再次按继续优化。空输入框按 Ctrl+G 可进入设置。' : 'Ctrl+G 打开预览；A 应用，R 继续优化，U 恢复，S 设置。'}结果不会自动发送。\n`);
     process.on('SIGINT', ignoreInterrupt);
     child = spawn(executable, ['--remote', endpoint, '--remote-auth-token-env', 'CPO_TUI_TOKEN', ...codexArgs], { cwd: initialCwd, env: environment, stdio: 'inherit', shell: false, windowsHide: false });
     stop = () => { runtime.dispose(); bridge.dispose(); child.kill(); };
@@ -151,10 +210,11 @@ async function start(values, codexArgs, config) {
   const separator = argv.indexOf('--');
   const prefix = separator < 0 ? argv : argv.slice(0, separator);
   const codexArgs = separator < 0 ? [] : argv.slice(separator + 1);
-  const parsed = parseArgs({ args: prefix, allowPositionals: true, options: Object.fromEntries(['codex', 'cwd', 'model', 'effort', 'context', 'timeout', 'template', 'session', 'instructions'].map(name => [name, { type: 'string' }]).concat([['help', { type: 'boolean', short: 'h' }]])) });
+  const parsed = parseArgs({ args: prefix, allowPositionals: true, options: Object.fromEntries(['codex', 'cwd', 'model', 'effort', 'context', 'timeout', 'template', 'mode', 'session', 'instructions'].map(name => [name, { type: 'string' }]).concat([['help', { type: 'boolean', short: 'h' }], ['json', { type: 'boolean' }]])) });
   const command = parsed.positionals[0] || 'start';
   if (parsed.values.help || command === 'help') { console.log(usage); return; }
   if (parsed.positionals.length > 1) throw new Error('Codex 原生参数请放在 -- 后面；修改要求请使用 --instructions。');
+  if (command === 'launch') return launch(parsed.values, codexArgs);
   const config = store.validateConfig({ ...await store.settings(), ...overrides(parsed.values) });
   if (command === 'start') return start(parsed.values, codexArgs, config);
   if (codexArgs.length) throw new Error('只有 start 支持 -- 后的 Codex 原生参数。');
@@ -162,11 +222,15 @@ async function start(values, codexArgs, config) {
     if (Object.keys(overrides(parsed.values)).length) {
       if (!builtins.some(item => item.id === config.template)) throw new Error('模板不存在，请运行 templates 查看。');
       await store.writeJson(path.join(store.home, 'config.json'), config);
-      console.log('已保存，下次 start 生效。');
+      if (!parsed.values.json) console.log('已保存，下次启动生效；正在运行的入口请在面板设置中修改。');
     }
-    console.log(JSON.stringify(config, null, 2)); return;
+    console.log(parsed.values.json ? JSON.stringify(config, null, 2) : display(configSummary(config) + `\n超时：${config.timeoutSeconds} 秒`)); return;
   }
-  if (command === 'templates') { console.log(builtins.map(item => `${item.id}\t${item.name}\t${item.description}`).join('\n')); return; }
+  if (command === 'templates') {
+    const templates = builtins.map(({ id, name, description }) => ({ id, name, description, active: id === config.template }));
+    console.log(parsed.values.json ? JSON.stringify(templates, null, 2) : templates.map(item => `${item.active ? '●' : '○'} ${item.name}（${item.id}）\n  ${item.description}`).join('\n'));
+    return;
+  }
   if (command === 'models') {
     const agent = new CodexAgent(await store.executableFor(parsed.values.codex), path.join(store.home, 'optimizer-workspace'));
     try {
@@ -178,14 +242,24 @@ async function start(values, codexArgs, config) {
   }
   if (command === 'sessions') {
     const runs = await store.liveRuns();
-    console.log(runs.length ? JSON.stringify(runs.map(item => item.status), null, 2) : '没有正在运行的优化入口。'); return;
+    const statuses = runs.map(item => item.status);
+    if (parsed.values.json) { console.log(JSON.stringify(statuses, null, 2)); return; }
+    if (!statuses.length) { console.log('没有正在运行的优化入口。'); return; }
+    console.log(display(statuses.map(item => {
+      const state = item.busy ? '正在处理' : item.reviewing ? '面板已打开' : '等待 Ctrl+G';
+      const template = builtins.find(template => template.id === item.template)?.name || item.template || '未知';
+      const action = ({ optimize: '优化', continue: '继续优化', undo: '恢复原文', settings: '打开设置' })[item.pendingAction] || item.pendingAction;
+      return `入口：${item.id}\n目录：${item.cwd || '等待建立对话'}\n状态：${state} · ${item.autoApply ? '直接回填' : '先预览'}\n模型：${item.model}\n模板：${template}\n待执行：${action}`;
+    }).join('\n\n')));
+    return;
   }
   if (command === 'last-error') {
     const id = parsed.values.session || (await store.selectRun()).id;
     store.runFile(id);
-    console.log(JSON.stringify(await store.readJson(path.join(store.home, 'errors', id + '.json'), { message: '没有记录到错误。' }), null, 2)); return;
+    const error = await store.readJson(path.join(store.home, 'errors', id + '.json'), { message: '没有记录到错误。' });
+    console.log(parsed.values.json ? JSON.stringify(error, null, 2) : display((error.at ? new Date(error.at).toLocaleString('zh-CN') + '\n' : '') + error.message)); return;
   }
-  if (['continue', 'undo', 'cancel'].includes(command)) {
+  if (['continue', 'undo', 'cancel', 'settings'].includes(command)) {
     const run = await store.selectRun(parsed.values.session);
     const result = await store.request(run, { action: command, instructions: parsed.values.instructions || '' });
     console.log(result.message); return;

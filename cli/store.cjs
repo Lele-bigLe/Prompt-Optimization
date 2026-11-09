@@ -7,7 +7,7 @@ const net = require('node:net');
 const { randomUUID } = require('node:crypto');
 
 const home = path.resolve(process.env.CPO_HOME || path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'prompt-optimizer-cli'));
-const defaults = { model: '', reasoningEffort: 'auto', contextEnabled: true, recentTurns: 8, maxContextChars: 24000, timeoutSeconds: 90, template: 'builtin-basic' };
+const defaults = { model: '', reasoningEffort: 'auto', contextEnabled: true, autoApply: true, recentTurns: 8, maxContextChars: 24000, timeoutSeconds: 90, template: 'builtin-basic' };
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 
 async function readJson(filename, fallback) {
@@ -31,6 +31,7 @@ function validateConfig(values) {
   if (typeof config.model !== 'string' || config.model.length > 200) throw new Error('模型 ID 不正确。');
   if (typeof config.reasoningEffort !== 'string' || !/^[a-z][a-z0-9_-]{0,29}$/.test(config.reasoningEffort)) throw new Error('思考程度不正确，请使用 models 列出的档位。');
   if (typeof config.contextEnabled !== 'boolean') throw new Error('参考聊天必须是 on 或 off。');
+  if (typeof config.autoApply !== 'boolean') throw new Error('直接回填设置需要是布尔值。');
   for (const [key, min, max] of [['recentTurns', 1, 30], ['maxContextChars', 1000, 100000], ['timeoutSeconds', 5, 300]]) {
     if (!Number.isInteger(config[key]) || config[key] < min || config[key] > max) throw new Error(`${key} 需要在 ${min} 到 ${max} 之间。`);
   }
@@ -50,7 +51,7 @@ function pipeFor(id) {
   return '\\\\.\\pipe\\prompt-optimizer-' + id;
 }
 
-async function request(run, message, timeout = 10000, signal) {
+async function request(run, message, timeout = 10000, signal, onEvent) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(pipeFor(run.id));
     socket.setEncoding('utf8');
@@ -62,19 +63,23 @@ async function request(run, message, timeout = 10000, signal) {
       if (error) reject(error); else resolve(value);
     };
     const abort = () => finish(new Error('已取消优化，原草稿保留。'));
-    const timer = setTimeout(() => finish(new Error('优化器响应超时，原草稿保留。')), timeout);
+    const timer = timeout ? setTimeout(() => finish(new Error('优化器响应超时，原草稿保留。')), timeout) : null;
     socket.on('connect', () => socket.write(JSON.stringify({ ...message, token: run.token }) + '\n'));
     socket.on('error', () => finish(new Error('无法连接这次 Codex 入口，请确认对应终端仍在运行。')));
     socket.on('end', () => finish(new Error('优化器连接已结束，原草稿保留。')));
     socket.on('data', chunk => {
       buffer += chunk.toString('utf8');
       if (buffer.length > 2 * 1024 * 1024) return finish(new Error('优化器返回的数据超过限制。'));
-      const newline = buffer.indexOf('\n');
-      if (newline < 0) return;
-      try {
-        const response = JSON.parse(buffer.slice(0, newline));
-        finish(response.error ? new Error(response.error) : null, response.result);
-      } catch { finish(new Error('优化器返回的消息格式不正确。')); }
+      let newline;
+      while (!settled && (newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
+        let response;
+        try { response = JSON.parse(line); }
+        catch { finish(new Error('优化器返回的消息格式不正确。')); return; }
+        if (response.event) {
+          try { onEvent?.(response.event); } catch (error) { finish(error); }
+        } else finish(response.error ? new Error(response.error) : null, response.result);
+      }
     });
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();

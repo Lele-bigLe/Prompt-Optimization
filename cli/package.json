@@ -1,8 +1,8 @@
 {
   "name": "prompt-optimization-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "在 Codex CLI 中后台优化未发送草稿，不打开浏览器。",
+  "description": "在 Codex CLI 中预览、继续优化和回填未发送草稿，不打开浏览器。",
   "license": "MIT",
   "bin": {
     "cpo": "index.cjs"

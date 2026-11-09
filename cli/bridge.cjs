@@ -14,6 +14,7 @@ class Bridge extends EventEmitter {
     this.frontRequests = new Map();
     this.token = token;
     this.closed = false;
+    this.bindingReason = '尚未收到创建或恢复对话的响应';
     const environment = { ...process.env };
     delete environment.CODEX_THREAD_ID; delete environment.CODEX_SESSION_ID;
     this.backend = new LineProcess(executable, [...configArgs, 'app-server', '--listen', 'stdio://'], cwd, 'Codex 主会话', environment);
@@ -22,9 +23,10 @@ class Bridge extends EventEmitter {
     this.backend.on('close', () => this.fail(new Error('Codex 主服务已结束。')));
   }
 
-  invalidate() {
+  invalidate(reason) {
     this.generation++;
     this.binding = null;
+    this.bindingReason = reason || '当前对话绑定已失效';
     this.emit('changed');
   }
 
@@ -46,7 +48,7 @@ class Bridge extends EventEmitter {
       let cachedInitialize = false;
       socket.on('error', () => socket.close());
       socket.on('close', () => {
-        if (this.front === socket) { this.front = null; this.invalidate(); }
+        if (this.front === socket) { this.front = null; this.invalidate('原生终端连接已断开'); }
       });
       socket.on('message', (bytes, binary) => {
         try {
@@ -59,14 +61,20 @@ class Bridge extends EventEmitter {
           }
           if (message.method === 'initialized' && cachedInitialize) return;
           if (message.id !== undefined && message.method) {
-            if (['thread/start', 'thread/resume', 'thread/fork'].includes(message.method)) this.invalidate();
-            this.frontRequests.set(JSON.stringify(message.id), { request: message, generation: this.generation });
-            if (message.method === 'thread/unsubscribe' && message.params?.threadId === this.binding?.id) this.invalidate();
+            if (['thread/start', 'thread/resume', 'thread/fork'].includes(message.method)) this.invalidate('正在创建或切换对话');
+            let previousTurnState;
+            if (message.method === 'thread/unsubscribe' && message.params?.threadId === this.binding?.id) {
+              // 取消的是事件订阅，不是界面当前选择的对话。
+              this.binding.detached = true;
+              this.generation++; this.emit('changed');
+            }
             if (message.method === 'turn/start' && message.params?.threadId === this.binding?.id) {
+              previousTurnState = { busy: this.binding.busy, empty: this.binding.empty, model: this.binding.model };
               if (typeof message.params.model === 'string') this.binding.model = message.params.model;
               this.binding.empty = false;
               this.binding.busy = true; this.generation++; this.emit('changed');
             }
+            this.frontRequests.set(JSON.stringify(message.id), { request: message, generation: this.generation, previousTurnState });
           }
           this.backend.send(message);
         } catch { socket.close(1008, 'Invalid protocol message'); }
@@ -87,21 +95,36 @@ class Bridge extends EventEmitter {
       else internal.resolve(message.result);
       return;
     }
+    // 已取消或超时的内部读取响应不能流入原生 TUI 的请求通道。
+    if (!message.method && typeof message.id === 'string' && message.id.startsWith('cpo:')) return;
     if (message.id !== undefined && !message.method) {
       const tracked = this.frontRequests.get(JSON.stringify(message.id));
       const request = tracked?.request;
       this.frontRequests.delete(JSON.stringify(message.id));
       if (request?.method === 'initialize' && message.result) this.initialized = message.result;
+      if (request?.method === 'turn/start' && message.error && tracked.previousTurnState && tracked.generation === this.generation && request.params?.threadId === this.binding?.id) {
+        // 请求被拒绝不会产生 turn/completed；只恢复本请求的预置状态，不覆盖后续通知。
+        Object.assign(this.binding, tracked.previousTurnState);
+        this.generation++; this.emit('changed');
+      }
       if (request && tracked.generation === this.generation && ['thread/start', 'thread/resume', 'thread/fork'].includes(request.method) && message.result?.thread?.id) {
         const result = message.result;
-        this.binding = { id: result.thread.id, cwd: result.cwd || result.thread.cwd, model: result.model, busy: result.thread.status?.type === 'active', empty: request.method === 'thread/start' && Array.isArray(result.thread.turns) && result.thread.turns.length === 0 };
+        this.binding = { id: result.thread.id, cwd: result.cwd || result.thread.cwd, model: result.model, busy: result.thread.status?.type === 'active', detached: result.thread.status?.type === 'notLoaded', empty: request.method === 'thread/start' && Array.isArray(result.thread.turns) && result.thread.turns.length === 0 };
+        this.bindingReason = '';
         this.generation++; this.emit('changed');
       }
     }
     const params = message.params;
     if (this.binding && params?.threadId === this.binding.id) {
-      if (['turn/started', 'turn/completed', 'thread/closed', 'thread/archived', 'thread/compacted'].includes(message.method)) {
-        if (['thread/closed', 'thread/archived'].includes(message.method)) this.binding = null;
+      if (message.method === 'thread/closed') {
+        this.binding.detached = true;
+        this.generation++; this.emit('changed');
+      }
+      if (['turn/started', 'turn/completed', 'thread/archived', 'thread/deleted', 'thread/compacted'].includes(message.method)) {
+        if (['thread/archived', 'thread/deleted'].includes(message.method)) {
+          this.binding = null;
+          this.bindingReason = '当前对话已归档或删除';
+        }
         else {
           this.binding.busy = message.method === 'turn/started';
           if (['turn/started', 'turn/completed'].includes(message.method)) this.binding.empty = false;
@@ -110,7 +133,11 @@ class Bridge extends EventEmitter {
       }
       if (message.method === 'thread/status/changed') {
         const busy = params.status?.type === 'active';
-        if (this.binding.busy !== busy) { this.binding.busy = busy; this.generation++; this.emit('changed'); }
+        const detached = this.binding.detached || params.status?.type === 'notLoaded';
+        if (this.binding.busy !== busy || this.binding.detached !== detached) {
+          this.binding.busy = busy; this.binding.detached = detached;
+          this.generation++; this.emit('changed');
+        }
       }
     }
     if (this.front?.readyState === 1) {
@@ -119,26 +146,62 @@ class Bridge extends EventEmitter {
     }
   }
 
-  rpc(method, params) {
+  rpc(method, params, signal) {
     if (!this.initialized || !this.front) throw new Error('Codex 尚未完成当前会话连接。');
     const id = 'cpo:' + randomUUID() + ':' + ++this.sequence;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('读取当前会话超时，未修改草稿。')); }, 15000);
-      this.pending.set(id, { resolve, reject, timer });
+      let settled = false;
+      const finish = (error, value) => {
+        if (settled) return;
+        settled = true; clearTimeout(timer); this.pending.delete(id); signal?.removeEventListener('abort', abort);
+        if (error) reject(error); else resolve(value);
+      };
+      const abort = () => finish(new Error('已取消读取当前会话。'));
+      const timer = setTimeout(() => finish(new Error('读取当前会话超时，未修改草稿。')), 15000);
+      this.pending.set(id, { resolve: value => finish(null, value), reject: error => finish(error), timer });
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) { abort(); return; }
       try { this.backend.send({ id, method, params }); }
-      catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
+      catch (error) { finish(error); }
     });
   }
 
   current() {
-    if (!this.binding?.id) throw new Error('尚未准确绑定当前对话，请先在 Codex 中新建或恢复一个会话。');
+    if (this.bindingCheck) throw new Error('正在核对当前对话状态，请稍后再按 Ctrl+G。');
+    if (!this.binding?.id) throw new Error(`尚未准确绑定当前对话（${this.bindingReason}），请先在 Codex 中新建或恢复一个会话。`);
     if (this.binding.busy) throw new Error('当前对话仍在生成，请结束后再优化草稿。');
     return { ...this.binding, generation: this.generation };
   }
 
+  checkCurrentThread() {
+    if (this.bindingCheck) return;
+    const binding = this.binding;
+    const generation = this.generation;
+    // 未订阅或已卸载仍可按原 ID 读取持久化聊天；不 resume，也不选择其他聊天。
+    const check = Promise.resolve().then(() => this.rpc('thread/read', { threadId: binding.id, includeTurns: false })).then(result => {
+      if (this.binding !== binding) return;
+      const status = result?.thread?.status?.type;
+      if (result?.thread?.id !== binding.id || !['notLoaded', 'idle', 'active', 'systemError'].includes(status)) throw new Error('无法确认原对话状态，未修改草稿。');
+      // 同一对话可能在读取期间收到状态通知，较早的读取结果不能覆盖更新的 busy。
+      if (this.generation === generation) binding.busy = status === 'active';
+    }).finally(() => { if (this.bindingCheck === check) this.bindingCheck = null; });
+    this.bindingCheck = check;
+  }
+
+  async currentReady() {
+    if (this.binding?.detached) this.checkCurrentThread();
+    if (this.bindingCheck) {
+      const binding = this.binding;
+      // 读取失败直接保留其原因；订阅/加载状态变化不等于切换了对话。
+      await this.bindingCheck;
+      if (this.binding !== binding) throw new Error('核对期间当前对话已切换或失效，未修改草稿。');
+    }
+    return this.current();
+  }
+
   fail(error) {
     if (this.closed) return;
-    this.invalidate();
+    this.invalidate('Codex 主服务已中断');
     for (const job of this.pending.values()) { clearTimeout(job.timer); job.reject(error); }
     this.pending.clear(); this.front?.close(1011, 'Backend closed');
     this.emit('fault', error);

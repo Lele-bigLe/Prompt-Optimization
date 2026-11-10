@@ -10,13 +10,14 @@ const { randomUUID, randomBytes, timingSafeEqual } = require('node:crypto');
 const store = require('./store.cjs');
 const { CodexAgent } = require('../core/codex.cjs');
 const { builtins } = require('../core/templates.cjs');
-const { display, configSummary } = require('./panel.cjs');
+const { display, configSummary, apiBillingUrl, openApiBilling } = require('./panel.cjs');
 const unsupportedOptions = /^(?:--(?:remote|remote-auth-token-env|no-daemon|worktree|profile)(?:=|$)|-p(?:[^-]|$))/;
 
 const usage = `Codex 提示词优化 CLI（Windows）
 
   node cli/index.cjs start [优化选项] -- [Codex 原生参数]
   node cli/index.cjs models [--codex 程序绝对路径]
+  node cli/index.cjs quota  （打开官方 API 账单页）
   node cli/index.cjs templates
   node cli/index.cjs config [优化选项]
   node cli/index.cjs launch [--codex 程序绝对路径] -- [Codex 原生参数]
@@ -214,6 +215,11 @@ async function start(values, codexArgs, config) {
   const command = parsed.positionals[0] || 'start';
   if (parsed.values.help || command === 'help') { console.log(usage); return; }
   if (parsed.positionals.length > 1) throw new Error('Codex 原生参数请放在 -- 后面；修改要求请使用 --instructions。');
+  if (command === 'quota') {
+    await openApiBilling();
+    console.log(`已请求打开官方 API 账单页：\n${apiBillingUrl}`);
+    return;
+  }
   if (command === 'launch') return launch(parsed.values, codexArgs);
   const config = store.validateConfig({ ...await store.settings(), ...overrides(parsed.values) });
   if (command === 'start') return start(parsed.values, codexArgs, config);

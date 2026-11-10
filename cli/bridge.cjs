@@ -61,7 +61,8 @@ class Bridge extends EventEmitter {
           }
           if (message.method === 'initialized' && cachedInitialize) return;
           if (message.id !== undefined && message.method) {
-            if (['thread/start', 'thread/resume', 'thread/fork'].includes(message.method)) this.invalidate('正在创建或切换对话');
+            const selectsThread = ['thread/start', 'thread/resume', 'thread/fork'].includes(message.method) && message.params?.ephemeral !== true;
+            if (selectsThread) this.invalidate('正在创建或切换对话');
             let previousTurnState;
             if (message.method === 'thread/unsubscribe' && message.params?.threadId === this.binding?.id) {
               // 取消的是事件订阅，不是界面当前选择的对话。
@@ -74,7 +75,7 @@ class Bridge extends EventEmitter {
               this.binding.empty = false;
               this.binding.busy = true; this.generation++; this.emit('changed');
             }
-            this.frontRequests.set(JSON.stringify(message.id), { request: message, generation: this.generation, previousTurnState });
+            this.frontRequests.set(JSON.stringify(message.id), { request: message, generation: this.generation, previousTurnState, selectsThread });
           }
           this.backend.send(message);
         } catch { socket.close(1008, 'Invalid protocol message'); }
@@ -91,7 +92,7 @@ class Bridge extends EventEmitter {
     const internal = this.pending.get(message.id);
     if (internal && !message.method) {
       this.pending.delete(message.id); clearTimeout(internal.timer);
-      if (message.error) internal.reject(new Error(`读取当前会话失败（${message.error.code}），未修改草稿。`));
+      if (message.error) internal.reject(Object.assign(new Error(`读取当前会话失败（${internal.method}，${message.error.code}），未修改草稿。`), { code: message.error.code }));
       else internal.resolve(message.result);
       return;
     }
@@ -107,7 +108,7 @@ class Bridge extends EventEmitter {
         Object.assign(this.binding, tracked.previousTurnState);
         this.generation++; this.emit('changed');
       }
-      if (request && tracked.generation === this.generation && ['thread/start', 'thread/resume', 'thread/fork'].includes(request.method) && message.result?.thread?.id) {
+      if (tracked?.selectsThread && tracked.generation === this.generation && message.result?.thread?.id && message.result.thread.ephemeral !== true) {
         const result = message.result;
         this.binding = { id: result.thread.id, cwd: result.cwd || result.thread.cwd, model: result.model, busy: result.thread.status?.type === 'active', detached: result.thread.status?.type === 'notLoaded', empty: request.method === 'thread/start' && Array.isArray(result.thread.turns) && result.thread.turns.length === 0 };
         this.bindingReason = '';
@@ -158,7 +159,7 @@ class Bridge extends EventEmitter {
       };
       const abort = () => finish(new Error('已取消读取当前会话。'));
       const timer = setTimeout(() => finish(new Error('读取当前会话超时，未修改草稿。')), 15000);
-      this.pending.set(id, { resolve: value => finish(null, value), reject: error => finish(error), timer });
+      this.pending.set(id, { resolve: value => finish(null, value), reject: error => finish(error), timer, method });
       signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) { abort(); return; }
       try { this.backend.send({ id, method, params }); }
@@ -182,14 +183,14 @@ class Bridge extends EventEmitter {
       if (this.binding !== binding) return;
       const status = result?.thread?.status?.type;
       if (result?.thread?.id !== binding.id || !['notLoaded', 'idle', 'active', 'systemError'].includes(status)) throw new Error('无法确认原对话状态，未修改草稿。');
-      // 同一对话可能在读取期间收到状态通知，较早的读取结果不能覆盖更新的 busy。
-      if (this.generation === generation) binding.busy = status === 'active';
+      // 摘要可能返回持久化的 idle；已订阅对话的生成状态以通知为准，读取也不能覆盖后续通知。
+      if (this.generation === generation && (binding.detached || status === 'active')) binding.busy = status === 'active';
     }).finally(() => { if (this.bindingCheck === check) this.bindingCheck = null; });
     this.bindingCheck = check;
   }
 
   async currentReady() {
-    if (this.binding?.detached) this.checkCurrentThread();
+    if (this.binding && !this.binding.empty) this.checkCurrentThread();
     if (this.bindingCheck) {
       const binding = this.binding;
       // 读取失败直接保留其原因；订阅/加载状态变化不等于切换了对话。

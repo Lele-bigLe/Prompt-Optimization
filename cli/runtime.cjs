@@ -23,7 +23,7 @@ class Runtime {
   }
 
   status() {
-    return { id: this.runId, editorProtocol: 3, autoApply: this.config.autoApply, cwd: this.bridge.binding?.cwd || null, threadId: this.bridge.binding?.id || null, busy: Boolean(this.job), reviewing: Boolean(this.review), model: this.config.model || this.bridge.binding?.model || '按 Codex 当前配置', template: this.config.template, pendingAction: this.next?.action || 'optimize' };
+    return { id: this.runId, editorProtocol: 4, autoApply: this.config.autoApply, cwd: this.bridge.binding?.cwd || null, threadId: this.bridge.binding?.id || null, busy: Boolean(this.job), reviewing: Boolean(this.review), model: this.config.model || this.bridge.binding?.model || '按 Codex 当前配置', reasoningEffort: this.config.reasoningEffort, template: this.config.template, pendingAction: this.next?.action || 'optimize' };
   }
 
   queue(action, instructions = '') {
@@ -39,7 +39,25 @@ class Runtime {
   async context(binding, signal) {
     if (!this.config.contextEnabled) return { messages: [], digest: hash('context-disabled') };
     if (binding.empty) return { messages: [], digest: hash(JSON.stringify([])) };
-    const page = await this.bridge.rpc('thread/turns/list', { threadId: binding.id, limit: this.config.recentTurns, sortDirection: 'desc', itemsView: 'full' }, signal);
+    let page;
+    try {
+      page = await this.bridge.rpc('thread/turns/list', { threadId: binding.id, limit: this.config.recentTurns, sortDirection: 'desc', itemsView: 'full' }, signal);
+    } catch (error) {
+      if (error.code !== -32601) throw error;
+      // 已加载的存储实现可能不支持分页；独立连接按同一 ID 读取持久化历史，不 resume。
+      await this.agent.connect();
+      if (signal?.aborted) throw error;
+      const metadata = await this.agent.rpc('thread/read', { threadId: binding.id, includeTurns: false });
+      if (metadata.thread?.id !== binding.id) throw error;
+      if (metadata.thread.historyMode === 'legacy') {
+        const result = await this.agent.rpc('thread/read', { threadId: binding.id, includeTurns: true });
+        if (result.thread?.id !== binding.id || !Array.isArray(result.thread.turns)) throw error;
+        page = { data: result.thread.turns.slice(-this.config.recentTurns).reverse() };
+      } else {
+        page = await this.agent.rpc('thread/turns/list', { threadId: binding.id, limit: this.config.recentTurns, sortDirection: 'desc', itemsView: 'full' });
+      }
+      if (signal?.aborted) throw error;
+    }
     if (!Array.isArray(page.data)) throw new Error('当前 Codex 未返回可用聊天记录，请检查 CLI 版本。');
     const messages = [];
     for (const turn of [...page.data].reverse()) {

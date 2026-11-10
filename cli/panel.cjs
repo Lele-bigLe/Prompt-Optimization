@@ -1,6 +1,7 @@
 'use strict';
 
 const readline = require('node:readline');
+const { spawn } = require('node:child_process');
 const { stripVTControlCharacters } = require('node:util');
 const { request } = require('./store.cjs');
 const { builtins } = require('../core/templates.cjs');
@@ -9,6 +10,15 @@ const { builtins } = require('../core/templates.cjs');
 const display = text => stripVTControlCharacters(String(text ?? '')).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
 const effortName = value => ({ auto: '模型默认', none: '不额外思考', minimal: '很少思考', low: '简单思考', medium: '适中思考', high: '深入思考', xhigh: '更深入思考', max: '最大思考程度', ultra: '最高思考程度' })[value] || value;
 const configSummary = config => `模板：${builtins.find(item => item.id === config.template)?.name || config.template} · ${config.model || '跟随当前聊天模型'} · ${effortName(config.reasoningEffort)}\n${config.contextEnabled ? `参考最近 ${config.recentTurns} 轮聊天，最多 ${config.maxContextChars} 字` : '仅使用当前草稿'} · ${config.autoApply ? '直接回填' : '先预览'}`;
+const apiBillingUrl = 'https://platform.openai.com/settings/organization/billing/overview';
+
+function openApiBilling() {
+  return new Promise((resolve, reject) => {
+    const child = spawn('rundll32.exe', ['url.dll,FileProtocolHandler', apiBillingUrl], { stdio: 'ignore', windowsHide: true });
+    child.once('error', () => reject(new Error(`无法打开浏览器，请访问 ${apiBillingUrl}`)));
+    child.once('spawn', () => { child.unref(); resolve(); });
+  });
+}
 
 // 按终端单元格换行，避免中文和 emoji 把固定操作栏挤出屏幕。
 const segmenter = new Intl.Segmenter('zh-CN', { granularity: 'grapheme' });
@@ -266,7 +276,7 @@ class Panel {
     const config = { ...(event.options.draftConfig || event.config) };
     const { templates } = event.options;
     let catalog;
-    let notice = event.error || '';
+    let notice = event.error || (this.restartRequired ? '设置可保存；优化草稿前请退出并用 codex resume 重启入口。' : '');
     while (!this.closed) {
       const dirty = JSON.stringify(config) !== JSON.stringify(event.config);
       const text = [
@@ -275,6 +285,7 @@ class Panel {
         `3  思考程度   ${effortName(config.reasoningEffort)}`,
         `4  参考聊天   ${config.contextEnabled ? '开启' : '关闭'}`,
         `5  应用方式   ${config.autoApply ? '直接回填' : '先预览'}`,
+        '6  API 余额（官方账单页）',
       ].join('\n\n');
       this.show(`优化设置${dirty ? ' · 未保存' : ''}`, (notice ? notice + '\n\n' : '') + text, '输入序号调整  Enter 保存并返回  Esc 放弃');
       notice = '';
@@ -282,6 +293,11 @@ class Panel {
       if (this.closed) return;
       if (choice === null) return this.choose(event.empty ? 'discard' : 'back');
       if (!choice.trim()) return this.choose(dirty ? 'configure' : 'back', dirty ? { config } : {});
+      if (choice.trim() === '6') {
+        try { await openApiBilling(); notice = '已请求打开官方 API 账单页。'; }
+        catch (error) { notice = error.message; }
+        continue;
+      }
       if (['2', '3'].includes(choice.trim()) && !catalog) {
         this.show('选择模型', '正在读取模型目录…', 'Esc 取消');
         try { catalog = await request(this.run, { action: 'review-models', reviewId: this.reviewId }, 0); }
@@ -302,7 +318,7 @@ class Panel {
         { id: false, name: '关闭', description: '仅优化当前草稿。' },
       ], config.contextEnabled);
       else if (choice.trim() === '5') config.autoApply = !config.autoApply;
-      else notice = '请输入 1–5，或按 Enter 保存。';
+      else notice = '请输入 1–6，或按 Enter 保存。';
     }
   }
 
@@ -333,4 +349,4 @@ class Panel {
   }
 }
 
-module.exports = { Panel, display, configSummary };
+module.exports = { Panel, display, configSummary, apiBillingUrl, openApiBilling };

@@ -3,13 +3,16 @@
 const readline = require('node:readline');
 const { spawn } = require('node:child_process');
 const { stripVTControlCharacters } = require('node:util');
-const { request } = require('./store.cjs');
+const { request, selectedConnection, validateConfig } = require('./store.cjs');
+const { randomUUID } = require('node:crypto');
+const { providers, efforts: apiEfforts } = require('../core/api.cjs');
+const providerNames = { codex: '已登录的 Codex', claude: '已登录的 Claude Code', deepseek: 'DeepSeek', anthropic: 'Claude API', 'openai-compatible': 'OpenAI 兼容 API' };
 const { builtins } = require('../core/templates.cjs');
 
 // 显示文本不解释模型输出中的终端控制序列，写回仍使用服务端保存的原文。
 const display = text => stripVTControlCharacters(String(text ?? '')).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
 const effortName = value => ({ auto: '模型默认', none: '不额外思考', minimal: '很少思考', low: '简单思考', medium: '适中思考', high: '深入思考', xhigh: '更深入思考', max: '最大思考程度', ultra: '最高思考程度' })[value] || value;
-const configSummary = config => `模板：${builtins.find(item => item.id === config.template)?.name || config.template} · ${config.model || '跟随当前聊天模型'} · ${effortName(config.reasoningEffort)}\n${config.contextEnabled ? `参考最近 ${config.recentTurns} 轮聊天，最多 ${config.maxContextChars} 字` : '仅使用当前草稿'} · ${config.autoApply ? '直接回填' : '先预览'}`;
+const configSummary = config => { const profile = selectedConnection(config); return `供应商：${profile.name} · ${providerNames[profile.provider]}\n模板：${builtins.find(item => item.id === config.template)?.name || config.template} · ${profile.model || '跟随客户端模型'} · ${effortName(profile.reasoningEffort)}\n${config.contextEnabled ? `参考最近 ${config.recentTurns} 轮聊天，最多 ${config.maxContextChars} 字` : '仅使用当前草稿'} · ${config.autoApply ? '直接回填' : '先预览'}`; };
 const apiBillingUrl = 'https://platform.openai.com/settings/organization/billing/overview';
 
 function openApiBilling() {
@@ -255,8 +258,42 @@ class Panel {
     this.render();
   }
 
-  ask(prompt) {
-    return new Promise(resolve => { this.input = { prompt, value: [], cursor: 0, resolve }; this.render(); });
+  ask(prompt, initial = '') {
+    const value = cells(display(initial)).map(cell => cell.text);
+    return new Promise(resolve => { this.input = { prompt, value, cursor: value.length, resolve }; this.render(); });
+  }
+
+  async connections(config) {
+    const choice = await this.select('供应商连接', [
+      { id: '', name: '默认 Codex' }, ...config.connections.map(item => ({ id: item.id, name: item.name, description: providerNames[item.provider] + ' · ' + (item.model || '客户端默认') })),
+      { id: 'new', name: '新增连接' }, ...(config.connection ? [{ id: 'edit', name: '编辑当前连接' }] : []),
+    ], config.connection);
+    if (!['new', 'edit'].includes(choice)) { config.connection = choice; return; }
+    const profile = choice === 'edit' ? { ...selectedConnection(config) } : { id: randomUUID(), name: '', provider: 'codex', model: '', reasoningEffort: 'auto' };
+    const previousModel = profile.model;
+    this.show('供应商连接', '', 'Enter 确认  Esc 放弃');
+    const name = await this.ask('连接名称：', profile.name);
+    if (name === null || this.closed) return;
+    profile.name = name.trim();
+    const provider = await this.select('供应商类型', Object.entries(providerNames).map(([id, name]) => ({ id, name })), profile.provider);
+    if (provider !== profile.provider) { profile.model = ''; profile.reasoningEffort = 'auto'; delete profile.apiBaseUrl; delete profile.apiKeyEnv; delete profile.executable; }
+    profile.provider = provider;
+    const fields = provider === 'claude' ? [['executable', 'Claude Code .exe 路径：', '']]
+      : providers.includes(provider) ? [
+        ['apiBaseUrl', 'API 地址：', provider === 'deepseek' ? 'https://api.deepseek.com' : provider === 'anthropic' ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1'],
+        ['apiKeyEnv', '密钥环境变量名：', provider === 'deepseek' ? 'DEEPSEEK_API_KEY' : provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'],
+        ['model', '模型 ID：', ''],
+      ] : [];
+    for (const [key, label, fallback] of fields) {
+      this.show('供应商连接', key === 'apiKeyEnv' ? '只填写变量名，不填写 API Key；环境变量需在启动入口前设置。' : '', 'Enter 确认  Esc 放弃');
+      const value = await this.ask(label, profile[key] || fallback);
+      if (value === null || this.closed) return;
+      profile[key] = value.trim();
+    }
+    if (provider === 'openai-compatible') profile.tokenLimitParameter = await this.select('输出长度参数', [{ id: 'max_tokens', name: 'max_tokens' }, { id: 'max_completion_tokens', name: 'max_completion_tokens' }], profile.tokenLimitParameter || 'max_tokens');
+    if (profile.model !== previousModel) profile.reasoningEffort = 'auto';
+    const connections = config.connections.filter(item => item.id !== profile.id).concat(profile);
+    Object.assign(config, validateConfig({ ...config, connections, connection: profile.id }));
   }
 
   async select(title, options, current) {
@@ -273,19 +310,23 @@ class Panel {
   }
 
   async settings(event) {
-    const config = { ...(event.options.draftConfig || event.config) };
+    const config = JSON.parse(JSON.stringify(event.options.draftConfig || event.config));
+    config.connections ||= []; config.connection ||= '';
     const { templates } = event.options;
     let catalog;
     let notice = event.error || (this.restartRequired ? '设置可保存；优化草稿前请退出并用 codex resume 重启入口。' : '');
     while (!this.closed) {
+      const profile = config.connections.find(item => item.id === config.connection) || config;
+      const provider = profile.provider || 'codex';
       const dirty = JSON.stringify(config) !== JSON.stringify(event.config);
       const text = [
         `1  模板       ${templates.find(item => item.id === config.template)?.name || config.template}`,
-        `2  模型       ${config.model || '跟随当前聊天'}`,
-        `3  思考程度   ${effortName(config.reasoningEffort)}`,
+        `2  模型       ${profile.model || '跟随客户端模型'}`,
+        `3  思考程度   ${effortName(profile.reasoningEffort)}`,
         `4  参考聊天   ${config.contextEnabled ? '开启' : '关闭'}`,
         `5  应用方式   ${config.autoApply ? '直接回填' : '先预览'}`,
         '6  API 余额（官方账单页）',
+        `7  供应商     ${selectedConnection(config).name}`,
       ].join('\n\n');
       this.show(`优化设置${dirty ? ' · 未保存' : ''}`, (notice ? notice + '\n\n' : '') + text, '输入序号调整  Enter 保存并返回  Esc 放弃');
       notice = '';
@@ -293,6 +334,20 @@ class Panel {
       if (this.closed) return;
       if (choice === null) return this.choose(event.empty ? 'discard' : 'back');
       if (!choice.trim()) return this.choose(dirty ? 'configure' : 'back', dirty ? { config } : {});
+      if (choice.trim() === '7') {
+        if (this.restartRequired) { notice = '供应商切换需要先退出并重新启动优化入口。'; continue; }
+        try { await this.connections(config); } catch (error) { notice = error.message; }
+        catalog = null;
+        continue;
+      }
+      if (providers.includes(provider) && ['2', '3'].includes(choice.trim())) {
+        if (choice.trim() === '2') {
+          this.show('API 模型', '', 'Enter 确认  Esc 返回');
+          const model = await this.ask('模型 ID：', profile.model);
+          if (model !== null && model.trim() !== profile.model) { profile.model = model.trim(); profile.reasoningEffort = 'auto'; }
+        } else profile.reasoningEffort = await this.select('API 思考程度（需服务商支持）', ['auto', ...apiEfforts.filter(id => provider === 'anthropic' ? id !== 'minimal' : provider === 'deepseek' ? ['none', 'low', 'high', 'max'].includes(id) : true)].map(id => ({ id, name: effortName(id) })), profile.reasoningEffort);
+        continue;
+      }
       if (choice.trim() === '6') {
         try { await openApiBilling(); notice = '已请求打开官方 API 账单页。'; }
         catch (error) { notice = error.message; }
@@ -300,25 +355,25 @@ class Panel {
       }
       if (['2', '3'].includes(choice.trim()) && !catalog) {
         this.show('选择模型', '正在读取模型目录…', 'Esc 取消');
-        try { catalog = await request(this.run, { action: 'review-models', reviewId: this.reviewId }, 0); }
+        try { catalog = await request(this.run, { action: 'review-models', reviewId: this.reviewId, config }, 0); }
         catch (error) { notice = error.message; continue; }
         if (this.closed) return;
       }
       if (choice.trim() === '1') {
         config.template = await this.select('选择优化模板', templates, config.template);
       } else if (choice.trim() === '2') {
-        const model = await this.select('选择优化模型', [{ id: '', name: `跟随当前聊天（${catalog.effectiveModel || 'Codex 默认'}）` }, ...catalog.models.map(item => ({ id: item.model, name: item.model }))], config.model);
-        if (model !== config.model) { config.model = model; config.reasoningEffort = 'auto'; }
+        const model = await this.select('选择优化模型', [{ id: '', name: `跟随客户端（${catalog.effectiveModel || providerNames[provider]}）` }, ...catalog.models.map(item => ({ id: item.model, name: item.model }))], profile.model);
+        if (model !== profile.model) { profile.model = model; profile.reasoningEffort = 'auto'; }
       } else if (choice.trim() === '3') {
-        const model = catalog.models.find(item => item.model === (config.model || catalog.effectiveModel));
+        const model = catalog.models.find(item => item.model === (profile.model || catalog.effectiveModel));
         const efforts = model?.supportedReasoningEfforts.map(item => item.reasoningEffort) || [];
-        config.reasoningEffort = await this.select('选择思考程度', ['auto', ...efforts.filter(item => item !== 'auto')].map(id => ({ id, name: effortName(id) })), config.reasoningEffort);
+        profile.reasoningEffort = await this.select('选择思考程度', ['auto', ...efforts.filter(item => item !== 'auto')].map(id => ({ id, name: effortName(id) })), profile.reasoningEffort);
       } else if (choice.trim() === '4') config.contextEnabled = await this.select('参考聊天', [
         { id: true, name: '开启', description: `参考最近 ${config.recentTurns} 轮，最多 ${config.maxContextChars} 字。` },
         { id: false, name: '关闭', description: '仅优化当前草稿。' },
       ], config.contextEnabled);
       else if (choice.trim() === '5') config.autoApply = !config.autoApply;
-      else notice = '请输入 1–6，或按 Enter 保存。';
+      else notice = '请输入 1–7，或按 Enter 保存。';
     }
   }
 

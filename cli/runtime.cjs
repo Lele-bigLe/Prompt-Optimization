@@ -6,7 +6,10 @@ const os = require('node:os');
 const { createHash, randomUUID } = require('node:crypto');
 const { CodexAgent } = require('../core/codex.cjs');
 const { builtins } = require('../core/templates.cjs');
-const { home, writeJson, validateConfig } = require('./store.cjs');
+const { home, writeJson, validateConfig, selectedConnection } = require('./store.cjs');
+const { optimize: optimizeApi } = require('../core/optimizer.cjs');
+const { providers, efforts } = require('../core/api.cjs');
+const { claudeModels, optimizeClaude } = require('../core/claude.cjs');
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const markers = value => value.match(/\[Image #\d+\]/g) || [];
@@ -23,7 +26,8 @@ class Runtime {
   }
 
   status() {
-    return { id: this.runId, editorProtocol: 4, autoApply: this.config.autoApply, cwd: this.bridge.binding?.cwd || null, threadId: this.bridge.binding?.id || null, busy: Boolean(this.job), reviewing: Boolean(this.review), model: this.config.model || this.bridge.binding?.model || '按 Codex 当前配置', reasoningEffort: this.config.reasoningEffort, template: this.config.template, pendingAction: this.next?.action || 'optimize' };
+    const profile = selectedConnection(this.config);
+    return { id: this.runId, editorProtocol: 5, autoApply: this.config.autoApply, cwd: this.bridge.binding?.cwd || null, threadId: this.bridge.binding?.id || null, busy: Boolean(this.job), reviewing: Boolean(this.review), provider: profile.provider, connectionName: profile.name, model: profile.model || (profile.provider === 'codex' ? this.bridge.binding?.model : null) || '跟随客户端模型', reasoningEffort: profile.reasoningEffort, template: this.config.template, pendingAction: this.next?.action || 'optimize' };
   }
 
   queue(action, instructions = '') {
@@ -108,11 +112,27 @@ class Runtime {
     return this.agent.models.length ? Promise.resolve({ models: this.agent.models, configuredModel: this.agent.configuredModel }) : this.agent.catalog();
   }
 
-  async modelOptions(reviewId) {
+  async providerCatalog(profile, signal) {
+    if (profile.provider === 'claude') {
+      const models = await claudeModels(profile.executable, path.join(home, 'optimizer-workspace'), false, signal);
+      return { models: models.map(item => ({ model: item.value, supportedReasoningEfforts: item.supportedEffortLevels.map(reasoningEffort => ({ reasoningEffort })) })) };
+    }
+    return this.catalog();
+  }
+
+  async modelOptions(reviewId, config = this.config) {
     const work = this.review;
     if (!work || work.id !== reviewId || !work.waiter || this.job) throw new Error('面板状态已变化，请重新打开设置。');
-    const catalog = await this.runJob(work, () => this.catalog());
-    return { models: catalog.models, effectiveModel: work.binding?.model || this.bridge.binding?.model || catalog.configuredModel || catalog.models.find(item => item.isDefault)?.model };
+    const profile = selectedConnection(validateConfig(config));
+    if (providers.includes(profile.provider)) throw new Error('API 连接请手动填写模型 ID。');
+    const catalog = await this.runJob(work, controller => this.providerCatalog(profile, controller.signal));
+    return { models: catalog.models, effectiveModel: profile.model || (profile.provider === 'codex' ? work.binding?.model || this.bridge.binding?.model || catalog.configuredModel || catalog.models.find(item => item.isDefault)?.model : '') };
+  }
+
+  releaseSession(session) {
+    if (session.provider === 'claude') { session.process?.stop(); delete session.process; }
+    else if (providers.includes(session.provider)) delete session.messages;
+    else this.agent.releaseSession(session);
   }
 
   assertCurrent(work) {
@@ -147,25 +167,33 @@ class Runtime {
         const context = await this.context(work.binding, controller.signal);
         if (controller.signal.aborted) throw new Error('优化已取消或超时。');
         notify({ type: 'progress', message: '正在准备优化模型…' });
-        const catalog = await this.catalog();
+        const profile = selectedConnection(this.config);
+        const catalog = profile.provider === 'codex' ? await this.catalog() : null;
         if (controller.signal.aborted) throw new Error('优化已取消或超时。');
-        const modelId = this.config.model || work.binding.model || catalog.configuredModel || catalog.models.find(model => model.isDefault)?.model;
-        const model = catalog.models.find(item => item.model === modelId);
-        if (!model) throw new Error('未找到可用优化模型，请在面板设置中选择模型。');
+        const modelId = profile.model || (catalog ? work.binding.model || catalog.configuredModel || catalog.models.find(model => model.isDefault)?.model : '');
+        if (catalog && !catalog.models.some(item => item.model === modelId)) throw new Error('未找到可用优化模型，请在面板设置中选择模型。');
         const template = builtins.find(item => item.id === this.config.template);
         if (!template) throw new Error('优化模板不存在，请在面板设置中重新选择。');
         const fingerprint = hash(JSON.stringify({ ...this.config, autoApply: undefined, model: modelId }));
         const previous = work.entry;
         const reused = continuing && previous && previous.contextHash === context.digest && previous.configHash === fingerprint;
-        if (previous && !reused) this.agent.releaseSession(previous.session);
-        session = reused ? previous.session : {};
+        if (previous && !reused) this.releaseSession(previous.session);
+        session = reused ? previous.session : { provider: profile.provider };
         const input = { draft: work.original, context: context.messages, images: [], draftImageCount: 0,
           ...(continuing && previous ? { revision: { previousPrompt: previous.candidate, instructions } } : {}),
         };
         const configuredTemplate = { ...template, systemPrompt: template.systemPrompt + '\n草稿中的 [Image #数字] 是原生附件占位，必须原样保留，不能新增、删除或改编号。本次未提供原图，不要声称理解了图片内容。' };
         notify({ type: 'progress', generating: true, message: `正在优化 · ${modelId} · ${template.name} · 参考 ${context.messages.length} 条消息\nS 设置并停止本次生成  Esc 取消` });
-        const result = await this.agent.optimize(input, { ...this.config, provider: 'codex', model: modelId, supportsImages: false, template: configuredTemplate }, controller.signal, session,
+        const options = { ...this.config, ...profile, model: modelId, supportsImages: false, template: configuredTemplate };
+        let result;
+        if (profile.provider === 'codex') result = await this.agent.optimize(input, options, controller.signal, session,
           chunk => { if (!controller.signal.aborted) notify({ type: 'text', ...chunk }); });
+        else if (profile.provider === 'claude') result = await optimizeClaude(profile.executable, path.join(home, 'optimizer-workspace'), input, options, controller.signal, session);
+        else {
+          const key = process.env[profile.apiKeyEnv];
+          if (!key?.trim()) throw new Error(`当前入口未读取到环境变量 ${profile.apiKeyEnv}，请设置后重新启动入口。`);
+          result = await optimizeApi(input, options, key, controller.signal, session);
+        }
         if (JSON.stringify(markers(result.text)) !== JSON.stringify(markers(work.draft))) throw new Error('模型改变了图片附件占位，请重试。');
         if ((await this.context(work.binding, controller.signal)).digest !== context.digest) throw new Error('优化期间参考聊天发生变化，请返回后重新打开面板。');
         this.assertCurrent(work);
@@ -174,7 +202,7 @@ class Runtime {
         work.entry = { original: work.original, candidate: result.text, templateName: template.name, contextHash: context.digest, configHash: fingerprint, session, model: modelId, modelMs: result.modelMs, sessionReused: result.sessionReused, updatedAt: new Date().toISOString() };
       });
     } catch (error) {
-      if (session) this.agent.releaseSession(session);
+      if (session) this.releaseSession(session);
       throw error;
     }
   }
@@ -201,12 +229,12 @@ class Runtime {
       await fs.rename(temporary, work.filename);
     } finally { await fs.unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
     const old = this.entries.get(work.binding.id);
-    if (old && old.session !== work.entry?.session) this.agent.releaseSession(old.session);
+    if (old && old.session !== work.entry?.session) this.releaseSession(old.session);
     this.entries.delete(work.binding.id);
-    if (restore) { if (work.entry) this.agent.releaseSession(work.entry.session); }
+    if (restore) { if (work.entry) this.releaseSession(work.entry.session); }
     else {
       this.entries.set(work.binding.id, work.entry); work.retained = true;
-      if (this.entries.size > 8) { const id = this.entries.keys().next().value; this.agent.releaseSession(this.entries.get(id).session); this.entries.delete(id); }
+      if (this.entries.size > 8) { const id = this.entries.keys().next().value; this.releaseSession(this.entries.get(id).session); this.entries.delete(id); }
     }
     return { applied: true, restored: restore, imageCount: markers(text).length, message: restore ? '已恢复原文，尚未发送。' : '已填回草稿，尚未发送。' };
   }
@@ -232,16 +260,19 @@ class Runtime {
 
   async configure(config) {
     if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('优化设置不正确。');
-    const next = validateConfig({ ...this.config, model: config.model, reasoningEffort: config.reasoningEffort, template: config.template, contextEnabled: config.contextEnabled, autoApply: config.autoApply });
-    if (next.model !== this.config.model || next.reasoningEffort !== this.config.reasoningEffort) {
-      const catalog = await this.runJob(this.review, () => this.catalog());
-      const modelId = next.model || this.review.binding?.model || this.bridge.binding?.model || catalog.configuredModel || catalog.models.find(item => item.isDefault)?.model;
+    const next = validateConfig({ ...this.config, model: config.model, reasoningEffort: config.reasoningEffort, connection: config.connection ?? this.config.connection, connections: config.connections ?? this.config.connections, template: config.template, contextEnabled: config.contextEnabled, autoApply: config.autoApply });
+    const profile = selectedConnection(next);
+    if (JSON.stringify(profile) !== JSON.stringify(selectedConnection(this.config)) && ['codex', 'claude'].includes(profile.provider)) {
+      const catalog = await this.runJob(this.review, controller => this.providerCatalog(profile, controller.signal));
+      const modelId = profile.model || (profile.provider === 'codex' ? this.review.binding?.model || this.bridge.binding?.model || catalog.configuredModel || catalog.models.find(item => item.isDefault)?.model : '');
       const model = catalog.models.find(item => item.model === modelId);
-      if (!model) throw new Error('请选择模型目录中可用的模型。');
-      if (next.reasoningEffort !== 'auto' && !model.supportedReasoningEfforts.some(item => item.reasoningEffort === next.reasoningEffort)) throw new Error('当前模型不支持这个思考程度。');
+      if (!model && !(profile.provider === 'claude' && !profile.model && profile.reasoningEffort === 'auto')) throw new Error('请选择模型目录中可用的模型。');
+      if (profile.reasoningEffort !== 'auto' && !model?.supportedReasoningEfforts.some(item => item.reasoningEffort === profile.reasoningEffort)) throw new Error('当前模型不支持这个思考程度。');
     }
+    if (providers.includes(profile.provider) && profile.reasoningEffort !== 'auto' && !efforts.includes(profile.reasoningEffort)) throw new Error('API 不支持这个思考档位。');
     if (!builtins.some(item => item.id === next.template)) throw new Error('所选模板不存在。');
     await writeJson(path.join(home, 'config.json'), next);
+    if (JSON.stringify(profile) !== JSON.stringify(selectedConnection(this.config))) for (const entry of this.entries.values()) this.releaseSession(entry.session);
     this.config = next;
   }
 
@@ -312,7 +343,7 @@ class Runtime {
       }
     } finally {
       signal.removeEventListener('abort', abort); work.controller.signal.removeEventListener('abort', changed);
-      if (!work.retained && work.entry && work.entry !== work.previous) this.agent.releaseSession(work.entry.session);
+      if (!work.retained && work.entry && work.entry !== work.previous) this.releaseSession(work.entry.session);
       if (this.review === work) this.review = null;
     }
   }
@@ -324,7 +355,7 @@ class Runtime {
     return { message: '已请求取消；尚未写回的草稿保留。' };
   }
 
-  dispose() { this.review?.controller.abort(); this.job?.abort(); this.agent.dispose(); }
+  dispose() { this.review?.controller.abort(); this.job?.abort(); for (const entry of this.entries.values()) this.releaseSession(entry.session); if (this.review?.entry) this.releaseSession(this.review.entry.session); this.agent.dispose(); }
 }
 
 module.exports = { Runtime };

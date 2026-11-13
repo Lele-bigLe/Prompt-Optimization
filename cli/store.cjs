@@ -5,9 +5,10 @@ const path = require('node:path');
 const os = require('node:os');
 const net = require('node:net');
 const { randomUUID } = require('node:crypto');
+const { providers, endpointFor } = require('../core/api.cjs');
 
 const home = path.resolve(process.env.CPO_HOME || path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'prompt-optimizer-cli'));
-const defaults = { model: '', reasoningEffort: 'auto', contextEnabled: true, autoApply: true, recentTurns: 8, maxContextChars: 24000, timeoutSeconds: 90, template: 'builtin-basic' };
+const defaults = { model: '', reasoningEffort: 'auto', connection: '', connections: [], contextEnabled: true, autoApply: true, recentTurns: 8, maxContextChars: 24000, timeoutSeconds: 90, template: 'builtin-basic' };
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 
 async function readJson(filename, fallback) {
@@ -36,7 +37,33 @@ function validateConfig(values) {
     if (!Number.isInteger(config[key]) || config[key] < min || config[key] > max) throw new Error(`${key} 需要在 ${min} 到 ${max} 之间。`);
   }
   if (typeof config.template !== 'string') throw new Error('优化模板 ID 不正确。');
+  if (!Array.isArray(config.connections) || config.connections.length > 50) throw new Error('最多保存 50 个供应商连接。');
+  config.connections = config.connections.map(item => {
+    if (!item || !uuid.test(item.id || '') || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 80) throw new Error('供应商连接名称或 ID 不正确。');
+    if (!['codex', 'claude', ...providers].includes(item.provider)) throw new Error('供应商类型不正确。');
+    if (typeof item.model !== 'string' || item.model.length > 200 || typeof item.reasoningEffort !== 'string' || !/^[a-z][a-z0-9_-]{0,29}$/.test(item.reasoningEffort)) throw new Error('连接的模型或思考程度不正确。');
+    const profile = { id: item.id, name: item.name.trim(), provider: item.provider, model: item.model.trim(), reasoningEffort: item.reasoningEffort };
+    if (providers.includes(item.provider)) {
+      if (typeof item.apiBaseUrl !== 'string' || item.apiBaseUrl.length > 2048) throw new Error('API 地址不正确或过长。');
+      profile.apiBaseUrl = item.apiBaseUrl;
+      endpointFor(profile);
+      if (typeof item.apiKeyEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,99}$/.test(item.apiKeyEnv)) throw new Error('请填写 API 密钥的环境变量名，不要填写密钥本身。');
+      profile.apiKeyEnv = item.apiKeyEnv;
+      profile.tokenLimitParameter = item.tokenLimitParameter === 'max_completion_tokens' ? 'max_completion_tokens' : 'max_tokens';
+      if (!profile.model) throw new Error('API 连接需要填写模型 ID。');
+    }
+    if (item.provider === 'claude') {
+      if (typeof item.executable !== 'string' || item.executable.length > 1024 || !path.isAbsolute(item.executable) || path.extname(item.executable).toLowerCase() !== '.exe') throw new Error('请填写 Claude Code 的 .exe 绝对路径。');
+      profile.executable = item.executable;
+    }
+    return profile;
+  });
+  if (new Set(config.connections.map(item => item.id)).size !== config.connections.length || typeof config.connection !== 'string' || config.connection && !config.connections.some(item => item.id === config.connection)) throw new Error('所选供应商连接不存在或 ID 重复。');
   return config;
+}
+
+function selectedConnection(config) {
+  return (config.connections || []).find(item => item.id === config.connection) || { provider: 'codex', name: '默认 Codex', model: config.model, reasoningEffort: config.reasoningEffort };
 }
 
 async function settings() { return validateConfig(await readJson(path.join(home, 'config.json'), {})); }
@@ -130,4 +157,4 @@ async function executableFor(override) {
   throw new Error('未找到官方 Codex 程序，请用 --codex 指定 codex.exe 的绝对路径。');
 }
 
-module.exports = { home, defaults, readJson, writeJson, validateConfig, settings, runFile, pipeFor, request, liveRuns, selectRun, executableFor };
+module.exports = { home, defaults, readJson, writeJson, validateConfig, selectedConnection, settings, runFile, pipeFor, request, liveRuns, selectRun, executableFor };

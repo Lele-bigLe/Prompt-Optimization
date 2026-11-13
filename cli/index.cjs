@@ -128,7 +128,7 @@ function controlServer(runtime, run) {
     socket.on('data', async chunk => {
       if (accepted) return;
       raw += chunk;
-      if (raw.length > 32000) { socket.destroy(); return; }
+      if (raw.length > 256 * 1024) { socket.destroy(); return; }
       const newline = raw.indexOf('\n');
       if (newline < 0) return;
       accepted = true;
@@ -148,7 +148,7 @@ function controlServer(runtime, run) {
           respond(await runtime.openReview(message.filename, controller.signal, notify, message.direct === true));
         }
         else if (message.action === 'review-action') respond(runtime.action(message));
-        else if (message.action === 'review-models') respond(await runtime.modelOptions(message.reviewId));
+        else if (message.action === 'review-models') respond(await runtime.modelOptions(message.reviewId, message.config));
         else if (message.action === 'cancel') respond(runtime.cancel());
         else if (['undo', 'continue', 'settings'].includes(message.action)) respond(runtime.queue(message.action, message.instructions));
         else throw new Error('不支持的操作。');
@@ -207,6 +207,9 @@ async function start(values, codexArgs, config) {
 }
 
 (async () => {
+  // 每次入口绑定不可变的运行版本，不占用待构建 exe，也不热替换已有窗口。
+  const native = await require('../core/native.cjs').nativeExecutable();
+  return forwardNative(native, process.argv.slice(2));
   const argv = process.argv.slice(2);
   const separator = argv.indexOf('--');
   const prefix = separator < 0 ? argv : argv.slice(0, separator);
@@ -221,7 +224,16 @@ async function start(values, codexArgs, config) {
     return;
   }
   if (command === 'launch') return launch(parsed.values, codexArgs);
-  const config = store.validateConfig({ ...await store.settings(), ...overrides(parsed.values) });
+  const saved = await store.settings();
+  const changes = overrides(parsed.values);
+  if (saved.connection) {
+    saved.connections = saved.connections.map(item => item.id === saved.connection ? { ...item,
+      ...(changes.model !== undefined ? { model: changes.model } : {}),
+      ...(changes.reasoningEffort !== undefined ? { reasoningEffort: changes.reasoningEffort } : {}),
+    } : item);
+    delete changes.model; delete changes.reasoningEffort;
+  }
+  const config = store.validateConfig({ ...saved, ...changes });
   if (command === 'start') return start(parsed.values, codexArgs, config);
   if (codexArgs.length) throw new Error('只有 start 支持 -- 后的 Codex 原生参数。');
   if (command === 'config') {

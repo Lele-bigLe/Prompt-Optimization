@@ -1,4 +1,56 @@
-# Codex CLI 提示词优化（0.2.0 开发版）
+# Codex CLI 提示词优化（Rust 0.4.3 开发版）
+
+原生入口使用 Rust、Ratatui 和 Crossterm，终端界面、事件循环、配置、供应商调用、草稿保护与 Codex 协议桥接均由 Rust 实现。可执行文件自身不需要 Node；Codex / Claude Code 登录连接仍需对应官方程序。
+
+## Rust 构建与启动
+
+在 Windows x64、Rust 1.94+ 环境中执行：
+
+```powershell
+cargo build --release --locked --manifest-path cli/Cargo.toml
+node cli/index.cjs launch --
+node cli/index.cjs launch -- resume
+```
+
+首次构建需下载 Cargo 依赖；锁文件随源码维护。内置模板直接从 `core/templates.json` 编译嵌入，独立 exe 无需携带模板文件。
+
+`launch` 沿用原命令的转交规则，独立原生命令、帮助、版本及尚未适配的参数交给官方 Codex。原有 `node cli/index.cjs` 和已接入的 PowerShell `codex` 函数会把原生程序按文件指纹放入共享目录的 `runtimes`，再启动对应版本。构建目录的 exe 不用于长时间运行，更新时无需关闭其他窗口；找不到原生程序时明确报错。已有窗口及其 Ctrl+G 编辑器固定使用启动时的同一版本，各窗口保留独立的管道与运行记录。相同版本复用一份文件，旧运行版本保留。
+
+CLI 偏好仍位于 `CPO_HOME`，默认是 `CODEX_HOME/prompt-optimizer-cli`（未设置 `CODEX_HOME` 时为用户 `.codex` 下的同名目录）。首次从旧 `config.json` 迁移至 `preferences-v2.json`，只保存 CLI 默认选择、模板与偏好；供应商统一保存在 `%LOCALAPPDATA%\CodexPromptOptimizer\connections.json`，不再向 CLI 偏好复制供应商池。`CPO_SHARED_HOME` 可指定共享目录，两端需使用相同设置。
+
+API 密钥优先读取 Windows 共享凭据，兼容旧连接的环境变量引用。扩展首次启动会通过 SecretStorage API 迁移旧密钥；CLI 首次迁移时也会保存当前可读取的环境变量密钥。旧文件和扩展旧密钥保留用于恢复。更换 API 地址或服务类型需要提供新地址的密钥。当前连接、模型和思考程度按窗口独立，连接资料修改在下一次请求读取；保存冲突会保留草稿并提示重新读取。
+
+## 原生终端界面
+
+设置中的供应商、模型、思考程度和模板支持 ←→ 直接切换；开关左键关闭、右键开启，应用方式左键预览、右键直接回填。连接表单中的枚举项也支持 ←→。模型列表可直接输入名称或 ID 筛选，支持粘贴、退格及 Ctrl+U 清空，Enter 选择、Esc 放弃；没有匹配项时不会改变当前模型。左右切换复用本次读取的模型目录，Enter 打开列表时重新读取。
+
+API Key 可在“管理连接 → 编辑当前连接 → API Key”直接填写，输入隐藏，已保存的密钥不回填，留空保留。填好后选择“完成编辑”，再按 Ctrl+S 保存到共享凭据存储；Esc 放弃。未保存的新 Key 也可用于获取模型目录，不会提前写入凭据存储。环境变量为可选的兼容方式，更换 API 地址或服务类型需重新提供密钥。
+
+- 日常仍在 Codex 输入草稿，Ctrl+G 默认优化并直接回填；不会自动发送。直接模式不绘制优化器生成页，S 停止并打开设置，Esc 取消。
+- 空草稿 Ctrl+G 打开设置。设置、连接表单与选择列表使用 ↑↓ 和 Enter；Esc 返回或放弃。设置的“保存并返回”或 Ctrl+S 提交保存，其余编辑先留在本次设置草稿中。
+- 设置页和连接表单的模型均从当前供应商目录中选择，不提供模型文本输入。API 连接可直接使用已共享的密钥；新增连接也可填写密钥环境变量名。目录读取失败或没有可选模型时保留当前值并提示错误。
+- 预览使用 `launch -- --optimizer-preview` 或设置中的“先预览”。宽窗口并排显示原文和结果；窄窗口 Tab 切换，↑↓ / PgUp / PgDn / Home / End 滚动，鼠标滚轮滚动当前正文。向上滚动暂停跟随，End 恢复。
+- 预览操作为 A 回填、R 继续优化、O 从原文重新生成、U 恢复、S 设置、Esc 保留原稿返回。Enter 不应用或发送。
+- R 打开多行修改要求，Enter 换行，Ctrl+S 提交继续优化，Esc 放弃；单行连接字段使用 Enter 确认。粘贴不会触发提交。
+- 渲染由 Ratatui 对比缓冲区后更新；网络任务与终端输入独立处理。退出时恢复进入前的 Windows 控制台模式。
+
+0.4.3 活动会话优化调整：允许原任务执行期间优化下一条草稿；开启参考聊天时固定本次读取的已完成轮次，继续核对这些轮次的内容，原任务完成后的新回复不混入本次优化。新一轮提交、切换会话、历史回退、压缩或草稿变化仍会使相关优化失效。
+
+2026-11-13 交付核对：`cargo build --release --locked --manifest-path cli/Cargo.toml` 成功；`node cli/index.cjs --version` 返回 `prompt-optimizer 0.4.3`；构建产物、`native/` 副本与共享运行副本 SHA-256 一致，普通 PowerShell `codex` 函数仍经过本项目入口。新启动窗口使用新版，已有窗口继续使用各自启动时的运行副本。尚未完成主任务并行生成期间的真实优化、取消与回填验收，不代表稳定版发布。
+
+CLI 通过 `VISUAL` / `EDITOR` 和 app-server 接入，不修改官方扩展文件，也不按 VS Code 扩展版本锁定；Codex CLI 协议或终端行为更新仍需核对兼容性。Ctrl+G 的外部编辑器退出前，原 Codex 界面等待回填，优化器接管输入；直接模式不绘制新页面也不等于原聊天可以交互滚动。滚动问题按用户要求暂不处理，0.4.3 不改变终端显示模式或滚动行为。
+
+Rust 编辑器协议为 8。此前直接占用构建文件的旧入口需保存草稿后正常退出一次，再用 `codex` 或增强入口 `resume`；之后的窗口使用隔离版本，无需为编译关闭会话。
+
+此前 Rust 界面验证：`cargo check --locked` 与 Release 编译通过；在 Windows ConPTY、Codex 0.167.1 中核对了空草稿设置、模板选择和保存、连接表单的中文输入和保存、非空草稿进入设置及放弃、宽窄窗口切换、返回 Codex 后继续输入和草稿保留。模型目录读取返回 8 个模型。连接表单使用独立配置目录和明确标记的占位模型，不代表供应商调用成功；当时没有发起模型推理，真实生成、流式结果、继续优化、取消生成和结果写回仍待调用验收。ConPTY 样本不代替桌面焦点与完整无闪动体验验收。
+
+0.4.0 已用独立配置完成双窗口核对：共享连接可见，各窗口模型选择独立，旧面板保存提示冲突；两个窗口运行期间 Release 编译成功。新窗口使用更新后的文件指纹，旧窗口及其编辑器继续使用原副本。未发起模型推理，扩展宿主中的真实密钥迁移仍待重载新版扩展后核对。
+
+其他命令沿用原入口：`config`、`templates`、`models`、`sessions`、`settings`、`continue`、`undo`、`cancel`、`last-error`、`quota`。`models` 读取当前默认连接的模型目录；日常启动继续使用 `codex` 或 `node cli/index.cjs launch --`，避免长期直接运行构建目录的 exe。
+
+## Node 0.2 实现与历史验证记录
+
+以下内容保留原实现的使用与验证记录，不作为 Rust 重构的运行验证结论。
 
 在 Codex CLI 中填写草稿，按 **Ctrl+G** 优化并直接填回输入框，不发送消息。再次按 Ctrl+G 可继续改善。需要查看和调整时，可选择先预览。
 
@@ -106,7 +158,7 @@ node cli/index.cjs start --cwd D:/你的项目
 
 应用后可在 Codex 输入框手动修改，检查后自行按 Enter 发送。预览模式下再次按 Ctrl+G 时，草稿仍等于刚应用的结果就直接显示预览，不会立即重复调用模型；可按 R 继续改善或 U 恢复。直接回填模式下再次按 Ctrl+G 会立即继续优化。手动改稿后重新优化会以新草稿为原文。
 
-自动配置的 `VISUAL` / `EDITOR` 仅对这次进程生效。面板需要交互式终端，不支持将输入输出重定向到文件。编辑器协议为 4，仍兼容协议 3 的空输入设置；旧入口优化非空草稿前，会在面板中提示先保存草稿、退出后通过 `codex resume` 恢复。更新源码不会热加载已运行的服务；普通 Codex 窗口不能直接接入。
+自动配置的 `VISUAL` / `EDITOR` 仅对这次进程生效。面板需要交互式终端，不支持将输入输出重定向到文件。编辑器协议为 5，仍兼容协议 3、4 的空输入基本设置；供应商切换需要重启入口。旧入口优化非空草稿前，会提示先保存草稿、退出后通过 `codex resume` 恢复。更新源码不会热加载已运行的服务；普通 Codex 窗口不能直接接入。
 
 恢复已有 Codex 对话：
 
@@ -127,6 +179,10 @@ node cli/index.cjs start --cwd D:/你的项目 -- resume
 设置第 6 项“API 余额（官方账单页）”或 `node cli/index.cjs quota` 请求在默认浏览器打开 [OpenAI API 账单页](https://platform.openai.com/settings/organization/billing/overview)。请在页面中选择正确的 API 组织查看余额；CLI 不读取浏览器凭据、不显示订阅限额，也不根据用量估算余额。当前核对的 [官方 API 额度说明](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) 指向该页面，尚未确认可用于 CLI 直接读取余额的公开接口。
 
 已有草稿且希望先改设置、不开始生成时，可在另一个终端执行 `node cli/index.cjs settings`，再回到对应 Codex 按 Ctrl+G。多入口时加 `--session 入口ID`。保存后按 O 从原文生成，已有结果也可按 R 继续优化。
+
+设置第 7 项“供应商”可新增、编辑和切换 CLI 独立连接，设置首页按 Enter 才保存。支持已登录的 Codex、已登录的 Claude Code、DeepSeek、Claude API 和 OpenAI 兼容 API；每个连接保存自己的模型及思考程度。Claude Code 需填写 `.exe` 绝对路径，API 连接手动填写模型 ID、API 地址和密钥环境变量名（例如 `OPENAI_API_KEY`，不是密钥本身）。环境变量须在启动入口前设置；未读取到密钥时停止优化，不回退到其他供应商。兼容 API 可选择 `max_tokens` 或 `max_completion_tokens`。
+
+切换只改变提示词优化器，不改变主聊天；参考聊天及草稿保护继续生效，连接变化后重新建立优化会话。连接信息保存在 CLI 的 `config.json`，不读取 VS Code 的连接或密钥。API 与 Claude Code 当前返回完整结果后显示，不提供 Codex 路径的流式预览。该功能目前完成源码接入，尚未执行真实供应商调用和终端交互验收。
 
 也可继续使用命令：
 
@@ -179,7 +235,7 @@ node cli/index.cjs cancel
 
 优化使用独立、禁用工具的临时会话，只改写文字。模型失败、超时、附件占位改变或原稿被修改时停止写回，不自动重试、执行草稿任务或发送聊天消息。
 
-本版保留原生图片附件占位，但**不向优化模型发送图片原图**。仅支持现有 Codex 登录后端；Claude Code、第三方 API 及完整历史回顾界面后续接入。
+本版保留原生图片附件占位，但**不向优化模型发送图片原图**。供应商支持范围见设置说明；完整历史回顾界面尚未接入。`models` 命令仍查询 Codex 目录，其他连接请在面板中配置模型。
 
 数据位于 `$CODEX_HOME/prompt-optimizer-cli`，未设置 `CODEX_HOME` 时位于 `~/.codex/prompt-optimizer-cli`：
 

@@ -19,13 +19,13 @@ const { Panel, display } = require('./panel.cjs');
     // 直接回填时也接管等待期间的按键，避免排队的 Enter 回到主聊天后提交草稿。
     panel.start();
     const status = await request(run, { action: 'status' }, 10000, controller.signal);
-    // 协议 3 的纯设置流程仍兼容；旧入口的历史优化修复则必须重启才能加载。
+    // 保留旧入口的空输入设置；新增供应商配置需要重新启动后加载。
     let legacySettings = false;
-    if (status.editorProtocol === 3) {
+    if ([3, 4].includes(status.editorProtocol)) {
       const stat = await fs.stat(process.argv[2]);
       legacySettings = stat.isFile() && stat.size <= 400000 && !(await fs.readFile(process.argv[2], 'utf8')).trim();
     }
-    if (status.editorProtocol !== 4 && !legacySettings) {
+    if (status.editorProtocol !== 5 && !legacySettings) {
       throw new Error('优化器仍在运行旧版本。请先保存未发送草稿，退出该 Codex 窗口后用 codex resume 恢复原会话。');
     }
     panel.restartRequired = legacySettings;

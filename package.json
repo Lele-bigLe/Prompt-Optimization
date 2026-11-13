@@ -2,7 +2,7 @@
   "name": "codex-prompt-optimizer-native",
   "displayName": "Codex Prompt Optimizer",
   "description": "在 Codex 输入框优化提示词，支持独立模型、会话上下文、预览和恢复。",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "local-codex-tools",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/Lele-bigLe/Prompt-Optimization.git" },

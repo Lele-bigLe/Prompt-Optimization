@@ -36,14 +36,14 @@ function replaceOnce(source, anchor, replacement) {
 
 function patchedSource(relativePath, source) {
   if (relativePath === 'out/extension.js') {
-    const anchor = 'let a=e.onDidReceiveMessage(u=>{if(s.markMessageReceived(),';
-    const forwarder = 'let a=e.onDidReceiveMessage(u=>{if(u?.type==="cpo:request"){s.markMessageReceived();void Promise.resolve().then(()=>{let p=Be.extensions.getExtension("local-codex-tools.codex-prompt-optimizer-native");if(!p)throw Error("Prompt optimizer unavailable");return p.activate()}).then(api=>api.handleBridgeRequest(u.payload,message=>this.postMessageToWebview(e,message))).then(payload=>this.postMessageToWebview(e,{type:"cpo:response",id:u.id,payload}),()=>this.postMessageToWebview(e,{type:"cpo:response",id:u.id,payload:{ok:false,error:"提示词优化扩展不可用，请检查是否已安装并启用。"}}));return}if(s.markMessageReceived(),';
+    const anchor = 'let a=e.onDidReceiveMessage(l=>{if(s.markMessageReceived(),';
+    const forwarder = 'let a=e.onDidReceiveMessage(l=>{if(l?.type==="cpo:request"){s.markMessageReceived();void Promise.resolve().then(()=>{let p=require("vscode").extensions.getExtension("local-codex-tools.codex-prompt-optimizer-native");if(!p)throw Error("Prompt optimizer unavailable");return p.activate()}).then(api=>api.handleBridgeRequest(l.payload,message=>this.postMessageToWebview(e,message))).then(payload=>this.postMessageToWebview(e,{type:"cpo:response",id:l.id,payload}),()=>this.postMessageToWebview(e,{type:"cpo:response",id:l.id,payload:{ok:false,error:"提示词优化扩展不可用，请检查是否已安装并启用。"}}));return}if(s.markMessageReceived(),';
     return replaceOnce(source, anchor, forwarder);
   }
-  const anchor = 'let _v;return t[1260]';
+  const anchor = 'let ky;return t[1366]';
   // 使用当前 composer 的作用域和编辑器控制器；不从全局“最近窗口”猜会话。
   // 状态在 bridge 模块独立导入，避免被 composer 内同名的压缩局部变量遮蔽。
-  const hook = '(0,wK.useLayoutEffect)(()=>__cpoBind({controller:Bn,identity:()=>({threadId:$i(K),hostId:K.get(Da,$i(K)),imageHostId:yt.hostId,scopeKind:K.value.kind,routeKey:pt.key}),images:()=>__cpoImages(K),turns:limit=>{let threadId=$i(K);return threadId==null?[]:__cpoTurns(K,{hostId:K.get(Da,threadId),threadId},limit)}}),[Bn,K,J,ut,pt.key,yt.hostId]);';
+  const hook = '(0,CZ.useLayoutEffect)(()=>__cpoBind({controller:Q,identity:()=>({threadId:vv(J),hostId:J.get(tc,vv(J)),imageHostId:kt.hostId,scopeKind:J.value.kind,routeKey:xt.key}),images:()=>__cpoImages(J),turns:limit=>{let threadId=vv(J);return threadId==null?[]:__cpoTurns(J,{hostId:J.get(tc,threadId),threadId},limit)}}),[Q,J,X,yt,xt.key,kt.hostId]);';
   return 'import{bindComposer as __cpoBind,readTurns as __cpoTurns,readImages as __cpoImages}from"./cpo-bridge.mjs";\n' + replaceOnce(source, anchor, hook + anchor);
 }
 
@@ -134,13 +134,16 @@ async function disableBridge(storage) {
   return withBridgeLock(storage, async () => {
     const state = await readState(storage);
     if (!state?.enabled) throw new Error('没有已启用的输入框桥接。');
-    if (state.version !== compatibility.extensionVersion || !/^bridge-backup-[\d]+-[a-f\d-]+$/.test(state.backupName)) throw new Error('桥接恢复记录不匹配，未恢复文件。');
+    // 升级适配后仍按旧版的固定清单恢复，不能用新版路径校验旧备份。
+    const files = state.version === compatibility.extensionVersion ? compatibility.files
+      : Object.hasOwn(compatibility.restoreOnly, state.version) ? compatibility.restoreOnly[state.version] : null;
+    if (!files || !/^bridge-backup-[\d]+-[a-f\d-]+$/.test(state.backupName)) throw new Error('桥接恢复记录不匹配，未恢复文件。');
     const restored = [];
-    for (const [index, relativePath] of Object.keys(compatibility.files).entries()) {
+    for (const [index, relativePath] of Object.keys(files).entries()) {
       const file = state.files[index];
-      if (file?.path !== relativePath || file.backup !== `${index}.original` || file.originalHash !== compatibility.files[relativePath]) throw new Error('桥接恢复路径不匹配。');
+      if (file?.path !== relativePath || file.backup !== `${index}.original` || file.originalHash !== files[relativePath]) throw new Error('桥接恢复路径不匹配。');
       const original = await fs.readFile(path.join(storage, state.backupName, file.backup));
-      if (digest(original) !== compatibility.files[relativePath]) throw new Error('原文件备份校验失败。');
+      if (digest(original) !== files[relativePath]) throw new Error('原文件备份校验失败。');
       const target = path.join(state.extensionRoot, relativePath);
       const currentHash = digest(await fs.readFile(target));
       if (currentHash !== file.patchedHash && currentHash !== file.originalHash) throw new Error('Codex 文件已被更新或再次修改，未覆盖新文件。');

@@ -4,7 +4,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 
-// 连接和模板使用同一种本机存储协议：独占写入、版本检查、原子替换。
+// 模板沿用本机存储；旧连接迁移借用此锁协调旧版窗口。
 function createJsonStore(directory, name, initialize, validate) {
   const filename = path.join(directory, `${name}.json`);
   let initializing;

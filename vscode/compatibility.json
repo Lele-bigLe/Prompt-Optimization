@@ -1,7 +1,13 @@
 {
-  "extensionVersion": "26.51021.22027",
+  "extensionVersion": "26.51111.21308",
   "files": {
-    "out/extension.js": "a9cc6736cd2c2d22f6cf43fc5763d5f8a873e4f741f522b44a600b1926f4e627",
-    "webview/assets/composer-content-d9d771011586.js": "83c9145993c797016c0325bf6d9872bd1a4ce0241c5847b0c905819e3f2a80a3"
+    "out/extension.js": "aa93a1b5aaa79746f3b583133355c659a0f059ff98d1956adf9da0e4afbcf817",
+    "webview/assets/composer-content-6cc26a542ed9.js": "c70d4fb79d2bf4bcc6caaae3e8d157fba901abb29ee004ada5ee0621e4356bae"
+  },
+  "restoreOnly": {
+    "26.51021.22027": {
+      "out/extension.js": "a9cc6736cd2c2d22f6cf43fc5763d5f8a873e4f741f522b44a600b1926f4e627",
+      "webview/assets/composer-content-d9d771011586.js": "83c9145993c797016c0325bf6d9872bd1a4ce0241c5847b0c905819e3f2a80a3"
+    }
   }
 }

@@ -164,7 +164,8 @@ async function configure(context, profileId, signal, reuseSource = false) {
     selectedModel = selected.model;
     next.supportsImages = selected.model.inputModalities?.includes('image') === true;
   } else if (source.value === 'claude') {
-    const executable = await executableFor('claude');
+    const executable = selectedProfile?.provider === 'claude' && selectedProfile.executable || await executableFor('claude');
+    next.executable = executable;
     const cwd = path.join(context.globalStorageUri.fsPath, 'claude-workspace');
     const models = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '读取 Claude Code 的账号和模型能力' }, async () => {
       await claudeAccount(executable, cwd);
@@ -198,12 +199,15 @@ async function configure(context, profileId, signal, reuseSource = false) {
   next.reasoningEffort = effort;
   if (signal?.aborted) throw new Error('已取消选择。');
   const levels = next.provider === 'codex' ? selectedModel?.supportedReasoningEfforts?.map(item => item.reasoningEffort) : selectedModel?.supportedEffortLevels;
-  return connections.save({
+  const profile = {
     id: selectedProfile?.provider === next.provider ? selectedProfile.id : undefined,
     name: selectedProfile?.provider === next.provider ? selectedProfile.name : `${sourceLabels[next.provider]} · ${next.model || '当前模型'}`.slice(0, 80),
     provider: next.provider, apiBaseUrl: '', model: next.model, reasoningEffort: next.reasoningEffort, supportsImages: next.supportsImages,
+    executable: next.provider === 'claude' ? next.executable : '',
     modelMetadata: { id: next.model, levels: levels || null, supportsImages: next.provider === 'codex' ? next.supportsImages : null },
-  }, undefined, store.revision);
+  };
+  if (profile.id) return connections.choose({ ...selectedProfile, ...profile }, store.revision);
+  return connections.save(profile, undefined, store.revision);
 }
 
 async function pickEffort(context, config, knownModel, skipUnavailable = false) {
@@ -215,7 +219,7 @@ async function pickEffort(context, config, knownModel, skipUnavailable = false) 
     levels = (model?.supportedReasoningEfforts ?? []).map(item => item.reasoningEffort);
     explanation = '使用这个模型推荐的思考程度。';
   } else if (config.provider === 'claude' && config.model) {
-    const models = knownModel ? [knownModel] : await claudeModels(await executableFor('claude'), path.join(context.globalStorageUri.fsPath, 'claude-workspace'));
+    const models = knownModel ? [knownModel] : await claudeModels(config.executable || await executableFor('claude'), path.join(context.globalStorageUri.fsPath, 'claude-workspace'));
     const model = knownModel ?? models.find(item => item.value === config.model) ?? models.find(item => item.resolvedModel === config.model);
     levels = model?.supportedEffortLevels ?? [];
     explanation = '沿用 Claude Code 的思考设置；具体档位由当前模型和账号规则决定。';
@@ -241,7 +245,7 @@ async function settingsState() {
   const [store, templateState] = await Promise.all([connections.read(), templates.read()]);
   const config = await settings(store, templateState);
   const fields = Object.fromEntries(['contextEnabled', 'includeImages', 'supportsImages', 'autoApply', 'historyEnabled', 'uiMode', 'recentTurns', 'maxContextChars', 'timeoutSeconds'].map(name => [name, config[name]]));
-  const items = await Promise.all(store.items.map(async item => ({ ...item, hasKey: providers.includes(item.provider) && Boolean(await connections.key(item)) })));
+  const items = store.items;
   const codex = vscode.extensions.getExtension('openai.chatgpt');
   const compatible = codex?.packageJSON.version === compatibility.extensionVersion;
   let bridge;
@@ -321,6 +325,7 @@ async function connectionDraft(form, requireModel = true) {
   } else {
     if (!previous || previous.provider !== profile.provider || previous.model !== profile.model) throw new Error('请通过“使用已登录账号”选择客户端和模型。');
     profile.apiBaseUrl = '';
+    if (profile.provider === 'claude') profile.executable = previous.executable;
     profile.modelMetadata = previous.modelMetadata;
   }
   if (profile.modelMetadata?.id === profile.model) {
@@ -330,14 +335,14 @@ async function connectionDraft(form, requireModel = true) {
   return { profile, key, enteredKey: typeof form.apiKey === 'string' && form.apiKey.trim() ? key : undefined };
 }
 
-async function connectionAction(action, message, signal) {
+async function connectionAction(context, action, message, signal) {
   if (action === 'saveEffort') {
     const store = await connections.read();
     const previous = store.items.find(item => item.id === message.id && item.id === store.activeId);
     if (!previous || store.revision !== message.connectionsRevision) throw new Error('正在使用的连接已变化，请确认当前模型后再调整思考程度。');
     const profile = { ...previous, reasoningEffort: message.value };
     validateEffort(profile);
-    await connections.save(profile, undefined, store.revision);
+    await connections.choose(profile, store.revision);
     return { notice: '思考程度已自动保存，下次优化时使用。' };
   }
   if (['activateConnection', 'removeConnection', 'clearKey'].includes(action)) {
@@ -345,11 +350,16 @@ async function connectionAction(action, message, signal) {
     const profile = store.items.find(item => item.id === message.id);
     if (!profile) throw new Error('请先选择一组已保存的连接。');
     if (action === 'activateConnection') {
+      if (store.revision !== message.connectionsRevision) throw new Error('连接已变化，请重新读取后再选择。');
+      if (profile.provider === 'codex' && !profile.model) {
+        const id = await configure(context, profile.id, signal, true);
+        return { selectedId: id || store.activeId, notice: id ? `正在使用 ${profile.name}。` : '已取消选择模型。' };
+      }
       await connections.activate(profile.id, message.connectionsRevision);
       return { selectedId: profile.id, notice: `正在使用 ${profile.name}。` };
     }
     const deleting = action === 'removeConnection';
-    const answer = await vscode.window.showWarningMessage(deleting ? `删除连接“${profile.name}”及其已保存密钥？` : `清除“${profile.name}”已保存的 API 密钥？`, { modal: true }, deleting ? '删除连接' : '清除密钥');
+    const answer = await vscode.window.showWarningMessage(deleting ? `从共享池删除“${profile.name}”及其密钥？CLI 和其他窗口将无法继续使用此连接。` : `清除“${profile.name}”的共享密钥？CLI 和其他窗口也会受影响。`, { modal: true }, deleting ? '删除连接' : '清除密钥');
     if (!answer) return { notice: '已取消，连接未更改。' };
     if (deleting) await connections.remove(profile.id, message.connectionsRevision);
     else await connections.clearKey(profile.id, message.connectionsRevision);
@@ -570,7 +580,7 @@ async function bridgeRequest(context, output, request, sender) {
         timeout = setTimeout(() => { timeoutExpired = true; abort.abort(); }, config.timeoutSeconds * 1000);
         const operation = (async () => {
           if (config.provider === 'codex') return (await getCodex(context)).optimize(input, config, abort.signal, session.backend);
-          if (config.provider === 'claude') return optimizeClaude(await executableFor('claude'), path.join(context.globalStorageUri.fsPath, 'claude-workspace'), input, config, abort.signal, session.backend);
+          if (config.provider === 'claude') return optimizeClaude(config.executable || await executableFor('claude'), path.join(context.globalStorageUri.fsPath, 'claude-workspace'), input, config, abort.signal, session.backend);
           const key = await connections.key(config);
           if (abort.signal.aborted) throw new Error('已取消优化。');
           return optimize(input, config, key, abort.signal, session.backend);
@@ -603,7 +613,7 @@ async function bridgeRequest(context, output, request, sender) {
 }
 
 function activate(context) {
-  connections = createConnections(context, legacySettings, secretId);
+  connections = createConnections(context, legacySettings, secretId, executableFor);
   templates = createTemplates(context);
   const output = vscode.window.createOutputChannel('Codex Prompt Optimizer');
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 50);
@@ -617,7 +627,7 @@ function activate(context) {
   settingsButton.show();
   openSettings = createSettings(context, {
     state: settingsState, configure: (id, signal, reuseSource) => configure(context, id, signal, reuseSource), history: () => showHistory(context), save: saveOption,
-    connection: connectionAction, template:templateAction, bridge: enabled => changeBridge(context, enabled),
+    connection: (action, message, signal) => connectionAction(context, action, message, signal), template:templateAction, bridge: enabled => changeBridge(context, enabled),
   });
   const register = (name, handler) => context.subscriptions.push(vscode.commands.registerCommand(`${prefix}.${name}`, async (...args) => {
     try { return await handler(...args); }

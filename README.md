@@ -2,9 +2,9 @@
 
 在 VS Code 的 Codex 聊天输入框中优化提示词：把需求写得更清楚，结合前面的聊天理解指代，支持图片、预览、继续优化和恢复原文。
 
-VS Code 当前源码版本：**0.4.0**。Windows Codex CLI **0.2.0 开发版**支持快捷键优化后直接回填，也可先预览；PowerShell 接入后仍用 `codex` 启动，见 [CLI 使用说明](cli/README.md)。历史会话的主要直接回填路径已实测，验证范围与未解决事项见 [CLI 测试摘要](cli/README.md#试用状态与已知问题)。
+VS Code 当前源码版本：**0.5.0**，Windows Rust CLI **0.4.3 开发版**。两端共用本机供应商池与 Windows 凭据；每个窗口独立选择连接、模型和思考程度。PowerShell 接入后仍用 `codex` 启动、Ctrl+G 优化，见 [CLI 使用说明](cli/README.md)。
 
-当前提交记录开发进展，不代表 CLI 0.2.0 全面验收或稳定版发布。VS Code 的常驻入口和设置调整尚未重新打包、安装及实际界面验收。
+当前源码记录开发进展，不代表全面验收或稳定版发布。升级扩展后需手动重载窗口；共享密钥迁移在新版扩展首次启动时执行，需在实际扩展宿主中验收。
 
 ## 功能
 
@@ -23,7 +23,7 @@ VS Code 当前源码版本：**0.4.0**。Windows Codex CLI **0.2.0 开发版**�
 
 ## 当前适配范围
 
-当前适配 **Windows x64、官方 Codex 扩展 `openai.chatgpt` 版本 `26.51021.22027`**，用于本地会话输入框。
+当前源码适配目标为 **Windows x64、官方 Codex 扩展 `openai.chatgpt` 版本 `26.51111.21308`**，用于本地会话输入框。2026-11-13 已完成 VSIX 安装、桥接启用及安装文件和备份哈希核对；新版入口、读取聊天和回填仍待重载后实测。
 
 普通扩展无法直接读写另一个扩展的私有聊天输入框。本项目采用版本绑定的本地桥接：启用前核对版本、原文件 SHA-256 和唯一修改位置，备份后修改 Codex 的两个文件，并加入桥接脚本。未匹配的版本会停止接入。
 
@@ -41,7 +41,7 @@ Codex 更新后需要重新核对适配。其他操作系统、云端会话和�
 
 设置页分为“常用、模型与连接、模板管理、高级”。“常用”可切换已保存的连接和模板、调整当前模型的思考程度，选择只优化草稿还是结合对话，以及先预览还是直接填回。偏好自动保存，连接和模板表单需明确保存并使用。
 
-从旧版升级时，若页面提示需要更新输入框连接，在设置页顶部先点击“断开连接并恢复原文件”，再重新连接，最后手动重新加载窗口。
+从旧版升级时，若页面提示需要更新输入框连接，在设置页顶部先点击“断开连接并恢复原文件”，再重新连接，最后手动重新加载窗口。保留 Codex `26.51021.22027` 的原文件恢复清单，仅用于移除旧桥接；请保留旧版扩展目录和桥接备份，直到恢复完成。
 
 ### 配置自己的 API
 
@@ -110,9 +110,11 @@ DeepSeek 官方连接可点击“查询余额”，保留服务返回的币种�
 
 ## 数据保存与恢复
 
-API 密钥保存在 VS Code SecretStorage 中。Codex / Claude Code 的登录由各自官方客户端处理，本扩展不提取或保存其登录令牌。
+API 密钥保存在当前 Windows 用户的凭据管理器中，由 CLI 和扩展共同使用，不写入连接 JSON 或日志。Codex / Claude Code 的登录仍由各自官方客户端处理，不提取或迁移其登录令牌。
 
-首次使用 0.4.0 时自动把旧连接迁移到本机 globalStorage 下的 `connections.json`，原设置保留用于兼容；迁移后连接以此文件为准，不再读取旧的地址、模型和思考设置。此文件只保存连接信息和能力快照，不保存密钥。每组连接使用独立密钥；并发保存使用文件锁及版本检查，避免旧页面覆盖新改动。
+共享连接以 `%LOCALAPPDATA%\CodexPromptOptimizer\connections.json` 为唯一来源；如设置 `CPO_SHARED_HOME`，两端需使用同一目录。首次使用分别迁移旧 CLI 连接和扩展连接，扩展通过 SecretStorage API 迁移旧密钥，原文件和原密钥保留用于恢复。只合并名称、连接设置和凭据能确认一致的记录，无法确认同一账号时保留独立条目。
+
+当前连接、模型与思考程度按窗口保存，切换不会修改其他已打开窗口。编辑连接资料、清除密钥和删除连接作用于共享池；其他窗口会在下一次读取时获得更新，已删除的连接需要重新选择。并发保存采用系统文件锁、版本检查和原子替换，旧页面无法覆盖新配置；进程退出会释放锁。
 
 自定义模板、当前模板选择和变量值保存在同一目录的 `templates.json`，内置模板来自扩展源码。模板保存同样使用文件锁与版本检查；连接表单和模板表单独立保留未保存的修改，不会因切换另一类设置而自动写入。
 
@@ -124,11 +126,14 @@ API 密钥保存在 VS Code SecretStorage 中。Codex / Claude Code 的登录由
 
 ## 从源码打包
 
-扩展源码没有额外的运行时 npm 依赖。使用当前官方 `vsce` 打包需要 Node.js 22 或更高版本：
+扩展没有额外的运行时 npm 依赖，但 Windows 安装包需要携带 Rust 原生存储程序。从源码打包需要 Rust 1.94+ 和 Node.js 22+：
 
 ```powershell
 git clone https://github.com/Lele-bigLe/Prompt-Optimization.git
 cd Prompt-Optimization
+cargo build --release --locked --manifest-path cli/Cargo.toml
+New-Item -ItemType Directory -Force native | Out-Null
+Copy-Item cli/target/release/prompt-optimizer.exe native/prompt-optimizer.exe
 npx --yes @vscode/vsce package --no-dependencies
 ```
 
@@ -137,6 +142,8 @@ npx --yes @vscode/vsce package --no-dependencies
 ```text
 core/       优化提示词、模型调用和官方客户端适配
 vscode/     输入框接入、设置页、预览和恢复
+cli/src/    Rust 终端界面、协议桥接和共享存储
+native/     安装包携带的 Windows 原生程序
 ```
 
 ## 来源与许可
